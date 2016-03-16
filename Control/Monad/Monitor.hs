@@ -21,7 +21,7 @@ import Control.Monad.Catch (MonadThrow(..), MonadCatch(..), MonadMask(..))
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.State.Strict (StateT, evalStateT, get, modify, put)
 import Control.Monad.Trans (MonadTrans(..))
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Set (Set)
 import qualified Data.Set as S
 import Data.Void (Void)
@@ -41,7 +41,7 @@ import Control.Monad.Monitor.Class
 newtype MonitoringT event m a = MonitoringT
   { unMonitoringT
     :: (Severity -> String -> m ())
-    -> StateT (Set event, [(String, Severity, Set event -> PropResult)]) m a
+    -> StateT (Set event, [(String, Severity, Set event -> PropResult event)]) m a
   }
 
 -- | The result of checking a @MonitoringT@ property.
@@ -50,15 +50,16 @@ newtype MonitoringT event m a = MonitoringT
 -- results. If a property evaluates to a proven result, this will
 -- never change, and so it can be removed from the set that is
 -- checked.
-data PropResult
+--
+-- A current result contains a property to replace the current
+-- one. This allows properties to evolve with the system being
+-- monitored.
+data PropResult event
   = ProvenTrue
   | ProvenFalse
-  | CurrentlyTrue
-  | CurrentlyFalse
-  deriving (Eq, Ord, Read, Show, Bounded, Enum)
-
-instance NFData PropResult where
-  rnf p = p `seq` ()
+  | CurrentlyTrue  (Set event -> PropResult event)
+  | CurrentlyFalse (Set event -> PropResult event)
+  | Neither (Set event -> PropResult event)
 
 -- | Run a 'MonitoringT' action with the supplied logging function.
 runMonitoringT :: Monad m
@@ -119,7 +120,7 @@ instance (MonadMask m, Ord event) => MonadMask (MonitoringT event m) where
 
 instance (Monad m, Ord event) => MonadMonitor (MonitoringT event m) where
   type Event (MonitoringT event m) = event
-  type Property (MonitoringT event m) = (String, Set event -> PropResult)
+  type Property (MonitoringT event m) = (String, Set event -> PropResult event)
 
   startEvents events = MonitoringT $ \logf -> do
     modify (first (S.union (S.fromList events)))
@@ -190,8 +191,8 @@ instance Monad m => MonadMonitor (NoMonitoringT m) where
 -- | Check the properties
 checkAll :: Monad m
   => m (Set event)
-  -> m [(String, Severity, Set event -> PropResult)]
-  -> ([(String, Severity, Set event -> PropResult)] -> m ())
+  -> m [(String, Severity, Set event -> PropResult event)]
+  -> ([(String, Severity, Set event -> PropResult event)] -> m ())
   -> (Severity -> String -> m ())
   -> m ()
 checkAll getEvents getProps setProps logf = do
@@ -201,8 +202,9 @@ checkAll getEvents getProps setProps logf = do
   setProps (catMaybes ps')
 
   where
-    check events p@(name, severity, prop) = case prop events of
+    check events (name, severity, prop) = case prop events of
       ProvenTrue  -> pure Nothing
       ProvenFalse -> logf severity name >> pure Nothing
-      CurrentlyTrue  -> pure (Just p)
-      CurrentlyFalse -> logf severity name >> pure (Just p)
+      CurrentlyTrue  prop' -> pure (Just (name, severity, prop'))
+      CurrentlyFalse prop' -> logf severity name >> pure (Just (name, severity, prop'))
+      Neither prop' -> pure (Just (name, severity, prop'))
