@@ -18,10 +18,13 @@ cabal-version:       >=1.10
 
 library
   exposed-modules:     Control.Monad.Monitor.Class
+                     , Control.Monad.Monitor
   -- other-modules:       
   -- other-extensions:    
   build-depends:       base >=4.8 && <4.9
+                     , containers
                      , deepseq
+                     , exceptions
                      , mtl
                      , transformers
   -- hs-source-dirs:      
