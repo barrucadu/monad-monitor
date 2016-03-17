@@ -1,4 +1,9 @@
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+
+-- All the mtl instances need some hairy extensions. Lovely.
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 -- | This module captures in a typeclass the interface of monads which
 -- allow monitoring some sort of properties.
@@ -39,46 +44,42 @@ import qualified Control.Monad.Writer.Strict as WS (WriterT)
 -- properties are not checked until the entire list has been
 -- processed.
 
-class Monad m => MonadMonitor m where
+class Monad m => MonadMonitor event m | m -> event where
   {-# MINIMAL
         (startEvent  | startEvents)
       , (stopEvent   | stopEvents)
       , (addProperty | addPropertyWithSeverity)
     #-}
 
-  -- | The type of events. An event is some situation which is
-  -- currently happening.
-  type Event m :: *
-
   -- | Signal than an event has begun.
   --
   -- > startEvent event = startEvents [event]
-  startEvent :: Event m -> m ()
+  startEvent :: event -> m ()
   startEvent event = startEvents [event]
 
   -- | Signal that a collection of events have begun. This may be atomic.
   --
   -- > startEvents = mapM_ startEvent
-  startEvents :: [Event m] -> m ()
+  startEvents :: [event] -> m ()
   startEvents = mapM_ startEvent
 
   -- | Signal that an event has stopped.
   --
   -- > stopEvent event = stopEvents [event]
-  stopEvent :: Event m -> m ()
+  stopEvent :: event -> m ()
   stopEvent event = stopEvents [event]
 
   -- | Signal that a collection of events have stopped. This may be
   -- atomic.
   --
   -- > stopEvents = mapM_ stopEvent
-  stopEvents :: [Event m] -> m ()
+  stopEvents :: [event] -> m ()
   stopEvents = mapM_ stopEvent
 
   -- | Add a new property to the collection being monitored.
   --
   -- > addProperty = addPropertyWithSeverity Warn
-  addProperty :: String -> Property (Event m) -> m ()
+  addProperty :: String -> Property event -> m ()
   addProperty = addPropertyWithSeverity Warn
 
   -- | Add a new property to the collection being monitored, with a
@@ -86,7 +87,7 @@ class Monad m => MonadMonitor m where
   -- on violation.
   --
   -- > addPropertyWithSeverity _ = addProperty
-  addPropertyWithSeverity :: Severity -> String -> Property (Event m) -> m ()
+  addPropertyWithSeverity :: Severity -> String -> Property event -> m ()
   addPropertyWithSeverity _ = addProperty
 
 -------------------------------------------------------------------------------
@@ -127,9 +128,7 @@ instance NFData Severity where
 
 -------------------------------------------------------------------------------
 
-instance MonadMonitor m => MonadMonitor (MaybeT m) where
-  type Event (MaybeT m) = Event m
-
+instance MonadMonitor event m => MonadMonitor event (MaybeT m) where
   startEvent = lift . startEvent
   stopEvent  = lift . stopEvent
 
@@ -139,9 +138,7 @@ instance MonadMonitor m => MonadMonitor (MaybeT m) where
   addProperty msg = lift . addProperty msg
   addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
 
-instance MonadMonitor m => MonadMonitor (ListT m) where
-  type Event (ListT m) = Event m
-
+instance MonadMonitor event m => MonadMonitor event (ListT m) where
   startEvent = lift . startEvent
   stopEvent  = lift . stopEvent
 
@@ -151,9 +148,7 @@ instance MonadMonitor m => MonadMonitor (ListT m) where
   addProperty msg = lift . addProperty msg
   addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
 
-instance MonadMonitor m => MonadMonitor (ReaderT r m) where
-  type Event (ReaderT r m) = Event   m
-
+instance MonadMonitor event m => MonadMonitor event (ReaderT r m) where
   startEvent = lift . startEvent
   stopEvent  = lift . stopEvent
 
@@ -163,9 +158,7 @@ instance MonadMonitor m => MonadMonitor (ReaderT r m) where
   addProperty msg = lift . addProperty msg
   addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
 
-instance (MonadMonitor m, Monoid w) => MonadMonitor (WL.WriterT w m) where
-  type Event (WL.WriterT w m) = Event m
-
+instance (MonadMonitor event m, Monoid w) => MonadMonitor event (WL.WriterT w m) where
   startEvent = lift . startEvent
   stopEvent  = lift . stopEvent
 
@@ -175,9 +168,7 @@ instance (MonadMonitor m, Monoid w) => MonadMonitor (WL.WriterT w m) where
   addProperty msg = lift . addProperty msg
   addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
 
-instance (MonadMonitor m, Monoid w) => MonadMonitor (WS.WriterT w m) where
-  type Event (WS.WriterT w m) = Event m
-
+instance (MonadMonitor event m, Monoid w) => MonadMonitor event (WS.WriterT w m) where
   startEvent = lift . startEvent
   stopEvent  = lift . stopEvent
 
@@ -187,9 +178,7 @@ instance (MonadMonitor m, Monoid w) => MonadMonitor (WS.WriterT w m) where
   addProperty msg = lift . addProperty msg
   addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
 
-instance MonadMonitor m => MonadMonitor (SL.StateT s m) where
-  type Event (SL.StateT s m) = Event m
-
+instance MonadMonitor event m => MonadMonitor event (SL.StateT s m) where
   startEvent = lift . startEvent
   stopEvent  = lift . stopEvent
 
@@ -199,9 +188,7 @@ instance MonadMonitor m => MonadMonitor (SL.StateT s m) where
   addProperty msg = lift . addProperty msg
   addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
 
-instance MonadMonitor m => MonadMonitor (SS.StateT s m) where
-  type Event (SS.StateT s m) = Event m
-
+instance MonadMonitor event m => MonadMonitor event (SS.StateT s m) where
   startEvent = lift . startEvent
   stopEvent  = lift . stopEvent
 
@@ -211,9 +198,7 @@ instance MonadMonitor m => MonadMonitor (SS.StateT s m) where
   addProperty msg = lift . addProperty msg
   addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
 
-instance (MonadMonitor m, Monoid w) => MonadMonitor (RL.RWST r w s m) where
-  type Event (RL.RWST r w s m) = Event m
-
+instance (MonadMonitor event m, Monoid w) => MonadMonitor event (RL.RWST r w s m) where
   startEvent = lift . startEvent
   stopEvent  = lift . stopEvent
 
@@ -223,9 +208,7 @@ instance (MonadMonitor m, Monoid w) => MonadMonitor (RL.RWST r w s m) where
   addProperty msg = lift . addProperty msg
   addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
 
-instance (MonadMonitor m, Monoid w) => MonadMonitor (RS.RWST r w s m) where
-  type Event (RS.RWST r w s m) = Event m
-
+instance (MonadMonitor event m, Monoid w) => MonadMonitor event (RS.RWST r w s m) where
   startEvent = lift . startEvent
   stopEvent  = lift . stopEvent
 

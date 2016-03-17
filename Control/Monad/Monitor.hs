@@ -1,3 +1,5 @@
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeFamilies #-}
 
@@ -116,9 +118,7 @@ instance (MonadMask m, Ord event) => MonadMask (MonitoringT event m) where
     uninterruptibleMask $ \u -> unMonitoringT (a $ q u) logf
     where q u (MonitoringT b) = MonitoringT (u . b)
 
-instance (Monad m, Ord event) => MonadMonitor (MonitoringT event m) where
-  type Event (MonitoringT event m) = event
-
+instance (Monad m, Ord event) => MonadMonitor event (MonitoringT event m) where
   startEvents events = MonitoringT $ \logf -> do
     modify (first (S.union (S.fromList events)))
     checkAll (fst <$> get)
@@ -301,9 +301,7 @@ concurrentt' :: MonadConc m
 concurrentt' f ma = ConcurrentMonitoringT $ \vars logf ->
   f (\g -> unConcurrentMonitoringT (ma $ concurrentt g) vars logf)
 
-instance (MonadConc m, Ord event) => MonadMonitor (ConcurrentMonitoringT event m) where
-  type Event (ConcurrentMonitoringT event m) = event
-
+instance (MonadConc m, Ord event) => MonadMonitor event (ConcurrentMonitoringT event m) where
   startEvents events = ConcurrentMonitoringT $ \(evar, pvar) logf ->
     join . atomically $ do
       modifyCTVar' evar (\es -> S.union es (S.fromList events))
@@ -369,9 +367,7 @@ instance MonadMask m => MonadMask (NoMonitoringT m) where
     \u -> runNoMonitoringT (a $ q u)
     where q u = NoMonitoringT . u . runNoMonitoringT
 
-instance Monad m => MonadMonitor (NoMonitoringT m) where
-  type Event (NoMonitoringT f) = Void
-
+instance Monad f => MonadMonitor Void (NoMonitoringT f) where
   startEvents _ = pure ()
   stopEvents  _ = pure ()
   addPropertyWithSeverity _ _ _ = pure ()
