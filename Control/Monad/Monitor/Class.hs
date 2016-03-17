@@ -111,6 +111,16 @@ instance NFData Severity where
 
 -------------------------------------------------------------------------------
 
+instance MonadMonitor event m => MonadMonitor event (IdentityT m) where
+  startEvent = lift . startEvent
+  stopEvent  = lift . stopEvent
+
+  startEvents = lift . startEvents
+  stopEvents  = lift . stopEvents
+
+  addProperty msg = lift . addProperty msg
+  addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
+
 instance MonadMonitor event m => MonadMonitor event (MaybeT m) where
   startEvent = lift . startEvent
   stopEvent  = lift . stopEvent
