@@ -32,3 +32,4 @@ library
                      , void
   -- hs-source-dirs:      
   default-language:    Haskell2010
+  ghc-options: -Wall
