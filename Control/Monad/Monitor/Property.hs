@@ -17,61 +17,69 @@
 --   up to and including the point where @φ@ does, but @φ@ does not
 --   necessarily ever need to hold.
 --
+-- There are some derived operations provided as functions:
+--
+-- - @F φ@ (or 'finally') expresses that φ has to hold somewhere on
+--   the subsequent path.
+--
+-- - @G φ@ (or 'globally') expresses that φ must hold in the entire
+--   subsequent execution.
+--
 -- The implementation of this module draws heavily from \"Runtime
 -- Verification of Haskell Programs\" [Solz & Huch, 2005].
-module Control.Monad.Monitor.LTL
+module Control.Monad.Monitor.Property
   ( -- * Properties
-    LTL(..)
+    Property(..)
+  , evaluateProp
   , normalise
 
   -- ** Derived operations
   , finally
   , globally
-
-  -- * Evaluation
-  , evaluateLTL
-  , propFromLTL
   ) where
-
--- local imports
-import Control.Monad.Monitor.Class (Property, PropResult(..))
 
 -------------------------------------------------------------------------------
 
 -- | The type of linear temporal logic formulae.
-data LTL event
+data Property event
   = Bool Bool
   -- ^ A literal true or false.
   | Event event
   -- ^ An event is currently active.
-  | Not (LTL event)
+  | Not (Property event)
   -- ^ Negation
-  | And (LTL event) (LTL event)
+  | And (Property event) (Property event)
   -- ^ Conjunction
-  | Or (LTL event) (LTL event)
+  | Or (Property event) (Property event)
   -- ^ Disjunction
-  | Next (LTL event)
-  -- ^ A property holds in the next step.
-  | Until (LTL event) (LTL event)
-  -- ^ The first property has to hold until at least the second does,
-  -- which holds at the current or some future position.
-  | Release (LTL event) (LTL event)
-  -- ^ The second property has to hold until and including the point
-  -- where the first does, which does not necessarily ever hold.
+  | Next (Property event)
+  -- ^ @Next phi@ expresses that the formula @phi@ must hold in the
+  -- next time step. In the case of this library, that will be after
+  -- the next time the events or properties are modified.
+  | Until (Property event) (Property event)
+  -- ^ @Until phi psi@ expresses that the formula @phi@ must hold at
+  -- least until @phi@ does, and that @psi@ must hold at some future
+  -- point.
+  | Release (Property event) (Property event)
+  -- ^ @Release phi psi@ expresses that the formula @psi@ must hold up
+  -- to and including the point where @phi@ does, but @phi@ does not
+  -- necessarily ever need to hold.
   deriving (Eq, Read, Show)
 
--- | A property has to hold at some point in the subsequent execution.
-finally :: LTL event -> LTL event
+-- | @finally phi@ expresses that @phi@ has to hold somewhere on
+-- the subsequent path.
+finally :: Property event -> Property event
 finally = Until (Bool True)
 
--- | The property has to hold in the entire subsequent execution.
-globally :: LTL event -> LTL event
+-- | @globally phi@ expresses that @phi@ must hold in the entire
+-- subsequent execution.
+globally :: Property event -> Property event
 globally = Not . finally . Not
 
--- | Normalise a given LTL formula: push @Not@s in as far as possible;
+-- | Normalise a given formula: push @Not@s in as far as possible;
 -- convert between @Release@/@Until@ and @And@/@Or@, and normalise all
 -- subexpressions.
-normalise :: LTL a -> LTL a
+normalise :: Property a -> Property a
 normalise (Next phi) = Next (normalise phi)
 normalise (phi `Until` psi) = normalise phi `Until` normalise psi
 normalise (phi `Release` psi) = normalise phi `Release` normalise psi
@@ -94,10 +102,10 @@ normalise f = f
 --
 -- - @Right False@: proven false,
 --
--- - @Left ltl@: neither true nor false, the new formula should be
+-- - @Left prop@: neither true nor false, the new formula should be
 --   checked against the subsequent execution.
-evaluateLTL :: Eq event => LTL event -> [event] -> Either (LTL event) Bool
-evaluateLTL ltl events = eval (normalise ltl) where
+evaluateProp :: Eq event => Property event -> [event] -> Either (Property event) Bool
+evaluateProp prop events = eval (normalise prop) where
   eval (Bool b) = Right b
 
   eval (Event event) = Right (event `elem` events)
@@ -143,15 +151,3 @@ evaluateLTL ltl events = eval (normalise ltl) where
       Right True  -> Left psi'
       Right False -> Left (psi' `And` r)
       Left phi' -> Left (psi' `And` (phi' `Or` (phi `Until` psi)))
-
--- | Convert a formula into a property suitable for the transformers.
---
--- Note that 'PropResult' is strictly more expressive than what is
--- needed for LTL: LTL has no notion of \"true/false at the moment,
--- but might change later\", which is allowed in @PropResult@ by the
--- @CurrentlyTrue@ and @CurrentlyFalse@ constructors.
-propFromLTL :: Eq event => LTL event -> Property event
-propFromLTL ltl events = case evaluateLTL ltl events of
-  Right True  -> ProvenTrue
-  Right False -> ProvenFalse
-  Left ltl'   -> Neither (propFromLTL ltl')

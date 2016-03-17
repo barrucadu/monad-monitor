@@ -7,7 +7,12 @@
 
 -- | This module captures in a typeclass the interface of monads which
 -- allow monitoring some sort of properties.
-module Control.Monad.Monitor.Class where
+module Control.Monad.Monitor.Class
+  ( MonadMonitor(..)
+  -- * Properties
+  , Property(..)
+  , Severity(..)
+  ) where
 
 import Control.DeepSeq (NFData(..))
 
@@ -23,6 +28,9 @@ import qualified Control.Monad.State.Lazy as SL (StateT)
 import qualified Control.Monad.State.Strict as SS (StateT)
 import qualified Control.Monad.Writer.Lazy as WL (WriterT)
 import qualified Control.Monad.Writer.Strict as WS (WriterT)
+
+-- local imports
+import Control.Monad.Monitor.Property
 
 -------------------------------------------------------------------------------
 
@@ -44,7 +52,7 @@ import qualified Control.Monad.Writer.Strict as WS (WriterT)
 -- properties are not checked until the entire list has been
 -- processed.
 
-class Monad m => MonadMonitor event m | m -> event where
+class (Monad m, Eq event) => MonadMonitor event m | m -> event where
   {-# MINIMAL
         (startEvent  | startEvents)
       , (stopEvent   | stopEvents)
@@ -89,31 +97,6 @@ class Monad m => MonadMonitor event m | m -> event where
   -- > addPropertyWithSeverity _ = addProperty
   addPropertyWithSeverity :: Severity -> String -> Property event -> m ()
   addPropertyWithSeverity _ = addProperty
-
--------------------------------------------------------------------------------
-
--- | A property is a function which takes all the currently active
--- events and decides whether the property has been proven
--- conclusively, is temporarily true or false, or there is not enough
--- information.
-type Property event = [event] -> PropResult event
-
--- | The result of checking a property.
---
--- There are two types of results: proven results, and current
--- results. If a property evaluates to a proven result, this will
--- never change, and so it can be removed from the set that is
--- checked.
---
--- A current result contains a property to replace the current
--- one. This allows properties to evolve with the system being
--- monitored.
-data PropResult event
-  = ProvenTrue
-  | ProvenFalse
-  | CurrentlyTrue  (Property event)
-  | CurrentlyFalse (Property event)
-  | Neither (Property event)
 
 -------------------------------------------------------------------------------
 

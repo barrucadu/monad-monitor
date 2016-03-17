@@ -6,9 +6,12 @@
 module Control.Monad.Monitor
   ( -- * @MonadMonitor@
     MonadMonitor(..)
-  , Property
-  , PropResult(..)
   , Severity(..)
+
+  -- * Properties
+  , Property(..)
+  , finally
+  , globally
 
     -- * Helper transformers
   , MonitoringT(..)
@@ -46,6 +49,7 @@ import System.IO (Handle, hPutStrLn, stderr, stdout)
 
 -- local imports
 import Control.Monad.Monitor.Class
+import Control.Monad.Monitor.Property
 
 -------------------------------------------------------------------------------
 
@@ -318,7 +322,7 @@ instance (MonadConc m, Ord event) => MonadMonitor event (ConcurrentMonitoringT e
       stmCheckAll evar pvar logf
 
 -- | Specialisation of 'checkAll' for STM.
-stmCheckAll :: (MonadSTM m, Monad n)
+stmCheckAll :: (MonadSTM m, Monad n, Eq event)
   => CTVar m (Set event)
   -> CTVar m [(String, Severity, Property event)]
   -> (Severity -> String -> n ())
@@ -375,7 +379,7 @@ instance Monad f => MonadMonitor Void (NoMonitoringT f) where
 -------------------------------------------------------------------------------
 
 -- | Check the properties
-checkAll :: Monad m
+checkAll :: (Monad m, Eq event)
   => m (Set event)
   -> m [(String, Severity, Property event)]
   -> ([(String, Severity, Property event)] -> m ())
@@ -388,9 +392,7 @@ checkAll getEvents getProps setProps logf = do
   setProps (catMaybes ps')
 
   where
-    check events (name, severity, prop) = case prop events of
-      ProvenTrue  -> pure Nothing
-      ProvenFalse -> logf severity name >> pure Nothing
-      CurrentlyTrue  prop' -> pure (Just (name, severity, prop'))
-      CurrentlyFalse prop' -> logf severity name >> pure (Just (name, severity, prop'))
-      Neither prop' -> pure (Just (name, severity, prop'))
+    check events (name, severity, prop) = case evaluateProp prop events of
+      Right True  -> pure Nothing
+      Right False -> logf severity name >> pure Nothing
+      Left  prop' -> pure (Just (name, severity, prop'))
