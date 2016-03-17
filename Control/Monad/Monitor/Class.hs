@@ -10,11 +10,15 @@
 module Control.Monad.Monitor.Class
   ( MonadMonitor(..)
   -- * Properties
+  , Template
   , Property(..)
   , Severity(..)
   ) where
 
 import Control.DeepSeq (NFData(..))
+import Control.Monad (filterM)
+import Data.Set (Set)
+import qualified Data.Set as S
 
 -- for the transformer instances
 import Control.Monad.Trans (lift)
@@ -48,15 +52,15 @@ import Control.Monad.Monitor.Property
 -- > stopEvents foos = mapM_ stopEvent foos
 --
 -- With the exception that the actual @startEvents@ and @stopEvents@
--- functions may be implemented differently for efficiency, or not
+-- functions may be implemented differently for efficiency, or
 -- properties are not checked until the entire list has been
 -- processed.
-
-class (Monad m, Eq event) => MonadMonitor event m | m -> event where
+class (Monad m, Ord event) => MonadMonitor event m | m -> event where
   {-# MINIMAL
         (startEvent  | startEvents)
       , (stopEvent   | stopEvents)
       , (addProperty | addPropertyWithSeverity)
+      , addTemplate
     #-}
 
   -- | Signal than an event has begun.
@@ -84,7 +88,8 @@ class (Monad m, Eq event) => MonadMonitor event m | m -> event where
   stopEvents :: [event] -> m ()
   stopEvents = mapM_ stopEvent
 
-  -- | Add a new property to the collection being monitored.
+  -- | Add a new property to the collection being monitored. Properties
+  -- are checked after event(s) are started or stopped.
   --
   -- > addProperty = addPropertyWithSeverity Warn
   addProperty :: String -> Property event -> m ()
@@ -92,11 +97,21 @@ class (Monad m, Eq event) => MonadMonitor event m | m -> event where
 
   -- | Add a new property to the collection being monitored, with a
   -- given severity which may influence the behaviour of the monitor
-  -- on violation.
+  -- on violation. Properties are checked after event(s) are started
+  -- or stopped.
   --
   -- > addPropertyWithSeverity _ = addProperty
   addPropertyWithSeverity :: Severity -> String -> Property event -> m ()
   addPropertyWithSeverity _ = addProperty
+
+  -- | Add a new property template. Property templates are called with
+  -- the set of currently-known events when first installed, and when
+  -- a new event is started for the first time, and may generate new
+  -- properties based on this information.
+  --
+  -- Properties which have been generated are recorded, and not added
+  -- to the pool if generated again.
+  addTemplate :: Template event -> m ()
 
 -------------------------------------------------------------------------------
 
@@ -111,6 +126,28 @@ instance NFData Severity where
 
 -------------------------------------------------------------------------------
 
+-- | Templates for generating more properties. A template is called
+-- with the set of currently known events (1) after it is initially
+-- installed, and (2) after a new event is seen for the first time.
+type Template event = Set event -> Set (String, Severity, Property event)
+
+-- | Lift a template over a small set to a template over a larger set,
+-- by filtering the types of events we care about, and checking all
+-- subsets.
+subsetTemplate :: Ord event
+  => (event -> Bool)
+  -> Template event
+  -> Template event
+subsetTemplate eventp template = powersetTemplate template . S.filter eventp
+
+-- | Apply a template to all subsets of a set.
+powersetTemplate :: Ord event => Template event -> Template event
+powersetTemplate template = instantiate . powerset where
+  powerset = map S.fromAscList . filterM (const [False,True]) . S.toList
+  instantiate = S.unions . map template
+
+-------------------------------------------------------------------------------
+
 instance MonadMonitor event m => MonadMonitor event (IdentityT m) where
   startEvent = lift . startEvent
   stopEvent  = lift . stopEvent
@@ -120,6 +157,8 @@ instance MonadMonitor event m => MonadMonitor event (IdentityT m) where
 
   addProperty msg = lift . addProperty msg
   addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
+
+  addTemplate = lift . addTemplate
 
 instance MonadMonitor event m => MonadMonitor event (MaybeT m) where
   startEvent = lift . startEvent
@@ -131,6 +170,8 @@ instance MonadMonitor event m => MonadMonitor event (MaybeT m) where
   addProperty msg = lift . addProperty msg
   addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
 
+  addTemplate = lift . addTemplate
+
 instance MonadMonitor event m => MonadMonitor event (ListT m) where
   startEvent = lift . startEvent
   stopEvent  = lift . stopEvent
@@ -140,6 +181,8 @@ instance MonadMonitor event m => MonadMonitor event (ListT m) where
 
   addProperty msg = lift . addProperty msg
   addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
+
+  addTemplate = lift . addTemplate
 
 instance MonadMonitor event m => MonadMonitor event (ReaderT r m) where
   startEvent = lift . startEvent
@@ -151,6 +194,8 @@ instance MonadMonitor event m => MonadMonitor event (ReaderT r m) where
   addProperty msg = lift . addProperty msg
   addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
 
+  addTemplate = lift . addTemplate
+
 instance (MonadMonitor event m, Monoid w) => MonadMonitor event (WL.WriterT w m) where
   startEvent = lift . startEvent
   stopEvent  = lift . stopEvent
@@ -160,6 +205,8 @@ instance (MonadMonitor event m, Monoid w) => MonadMonitor event (WL.WriterT w m)
 
   addProperty msg = lift . addProperty msg
   addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
+
+  addTemplate = lift . addTemplate
 
 instance (MonadMonitor event m, Monoid w) => MonadMonitor event (WS.WriterT w m) where
   startEvent = lift . startEvent
@@ -171,6 +218,8 @@ instance (MonadMonitor event m, Monoid w) => MonadMonitor event (WS.WriterT w m)
   addProperty msg = lift . addProperty msg
   addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
 
+  addTemplate = lift . addTemplate
+
 instance MonadMonitor event m => MonadMonitor event (SL.StateT s m) where
   startEvent = lift . startEvent
   stopEvent  = lift . stopEvent
@@ -180,6 +229,8 @@ instance MonadMonitor event m => MonadMonitor event (SL.StateT s m) where
 
   addProperty msg = lift . addProperty msg
   addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
+
+  addTemplate = lift . addTemplate
 
 instance MonadMonitor event m => MonadMonitor event (SS.StateT s m) where
   startEvent = lift . startEvent
@@ -191,6 +242,8 @@ instance MonadMonitor event m => MonadMonitor event (SS.StateT s m) where
   addProperty msg = lift . addProperty msg
   addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
 
+  addTemplate = lift . addTemplate
+
 instance (MonadMonitor event m, Monoid w) => MonadMonitor event (RL.RWST r w s m) where
   startEvent = lift . startEvent
   stopEvent  = lift . stopEvent
@@ -201,6 +254,8 @@ instance (MonadMonitor event m, Monoid w) => MonadMonitor event (RL.RWST r w s m
   addProperty msg = lift . addProperty msg
   addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
 
+  addTemplate = lift . addTemplate
+
 instance (MonadMonitor event m, Monoid w) => MonadMonitor event (RS.RWST r w s m) where
   startEvent = lift . startEvent
   stopEvent  = lift . stopEvent
@@ -210,3 +265,5 @@ instance (MonadMonitor event m, Monoid w) => MonadMonitor event (RS.RWST r w s m
 
   addProperty msg = lift . addProperty msg
   addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
+
+  addTemplate = lift . addTemplate
