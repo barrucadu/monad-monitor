@@ -2,12 +2,14 @@
 {-# LANGUAGE TypeFamilies #-}
 
 module Control.Monad.Monitor
-  ( -- * MonadMonitor
+  ( -- * @MonadMonitor@
     MonadMonitor(..)
-
-    -- * Helper transformer
-  , MonitoringT(..)
+  , Property
   , PropResult(..)
+  , Severity(..)
+
+    -- * Helper transformers
+  , MonitoringT(..)
   , runMonitoringT
   , runStdoutMonitoringT
   , runStderrMonitoringT
@@ -54,25 +56,8 @@ import Control.Monad.Monitor.Class
 newtype MonitoringT event m a = MonitoringT
   { unMonitoringT
     :: (Severity -> String -> m ())
-    -> StateT (Set event, [(String, Severity, Set event -> PropResult event)]) m a
+    -> StateT (Set event, [(String, Severity, Property event)]) m a
   }
-
--- | The result of checking a @MonitoringT@ property.
---
--- There are two types of results: proven results, and current
--- results. If a property evaluates to a proven result, this will
--- never change, and so it can be removed from the set that is
--- checked.
---
--- A current result contains a property to replace the current
--- one. This allows properties to evolve with the system being
--- monitored.
-data PropResult event
-  = ProvenTrue
-  | ProvenFalse
-  | CurrentlyTrue  (Set event -> PropResult event)
-  | CurrentlyFalse (Set event -> PropResult event)
-  | Neither (Set event -> PropResult event)
 
 -- | Run a 'MonitoringT' action with the supplied logging function.
 runMonitoringT :: Monad m
@@ -133,7 +118,6 @@ instance (MonadMask m, Ord event) => MonadMask (MonitoringT event m) where
 
 instance (Monad m, Ord event) => MonadMonitor (MonitoringT event m) where
   type Event (MonitoringT event m) = event
-  type Property (MonitoringT event m) = (String, Set event -> PropResult event)
 
   startEvents events = MonitoringT $ \logf -> do
     modify (first (S.union (S.fromList events)))
@@ -149,7 +133,7 @@ instance (Monad m, Ord event) => MonadMonitor (MonitoringT event m) where
              (modify . second . const)
              (\sev msg -> lift (logf sev msg))
 
-  addPropertyWithSeverity severity (name, checker) = MonitoringT $ \logf -> do
+  addPropertyWithSeverity severity name checker = MonitoringT $ \logf -> do
     modify (second ((name, severity, checker) :))
     checkAll (fst <$> get)
              (snd <$> get)
@@ -159,7 +143,7 @@ instance (Monad m, Ord event) => MonadMonitor (MonitoringT event m) where
 -------------------------------------------------------------------------------
 
 -- | Monad transformer that adds monitoring functionality to
--- concurrency monads.
+-- concurrency monads, based on a shared mutable set of active events.
 --
 -- The monitoring behaviour here is to check properties hold after all
 -- the 'MonadMonitor' operations. A function is required to deal with
@@ -167,7 +151,7 @@ instance (Monad m, Ord event) => MonadMonitor (MonitoringT event m) where
 newtype ConcurrentMonitoringT event m a = ConcurrentMonitoringT
   { unConcurrentMonitoringT
     :: ( CTVar (STMLike m) (Set event)
-       , CTVar (STMLike m) [(String, Severity, Set event -> PropResult event)]
+       , CTVar (STMLike m) [(String, Severity, Property event)]
        )
     -> (Severity -> String -> m ())
     -> m a
@@ -319,7 +303,6 @@ concurrentt' f ma = ConcurrentMonitoringT $ \vars logf ->
 
 instance (MonadConc m, Ord event) => MonadMonitor (ConcurrentMonitoringT event m) where
   type Event (ConcurrentMonitoringT event m) = event
-  type Property (ConcurrentMonitoringT event m) = (String, Set event -> PropResult event)
 
   startEvents events = ConcurrentMonitoringT $ \(evar, pvar) logf ->
     join . atomically $ do
@@ -331,7 +314,7 @@ instance (MonadConc m, Ord event) => MonadMonitor (ConcurrentMonitoringT event m
       modifyCTVar' evar (\es -> S.difference es (S.fromList events))
       stmCheckAll evar pvar logf
 
-  addPropertyWithSeverity severity (name, checker) = ConcurrentMonitoringT $ \(evar, pvar) logf ->
+  addPropertyWithSeverity severity name checker = ConcurrentMonitoringT $ \(evar, pvar) logf ->
     join . atomically $ do
       modifyCTVar' pvar ((name, severity, checker) :)
       stmCheckAll evar pvar logf
@@ -339,7 +322,7 @@ instance (MonadConc m, Ord event) => MonadMonitor (ConcurrentMonitoringT event m
 -- | Specialisation of 'checkAll' for STM.
 stmCheckAll :: (MonadSTM m, Monad n)
   => CTVar m (Set event)
-  -> CTVar m [(String, Severity, Set event -> PropResult event)]
+  -> CTVar m [(String, Severity, Property event)]
   -> (Severity -> String -> n ())
   -> m (n ())
 stmCheckAll evar pvar logf = do
@@ -388,23 +371,22 @@ instance MonadMask m => MonadMask (NoMonitoringT m) where
 
 instance Monad m => MonadMonitor (NoMonitoringT m) where
   type Event (NoMonitoringT f) = Void
-  type Property (NoMonitoringT f) = Void
 
   startEvents _ = pure ()
   stopEvents  _ = pure ()
-  addPropertyWithSeverity _ _ = pure ()
+  addPropertyWithSeverity _ _ _ = pure ()
 
 -------------------------------------------------------------------------------
 
 -- | Check the properties
 checkAll :: Monad m
   => m (Set event)
-  -> m [(String, Severity, Set event -> PropResult event)]
-  -> ([(String, Severity, Set event -> PropResult event)] -> m ())
+  -> m [(String, Severity, Property event)]
+  -> ([(String, Severity, Property event)] -> m ())
   -> (Severity -> String -> m ())
   -> m ()
 checkAll getEvents getProps setProps logf = do
-  es <- getEvents
+  es <- S.toList <$> getEvents
   ps <- getProps
   ps' <- mapM (check es) ps
   setProps (catMaybes ps')

@@ -33,11 +33,8 @@ module Control.Monad.Monitor.LTL
   , propFromLTL
   ) where
 
-import Data.Set (Set)
-import qualified Data.Set as S
-
 -- local imports
-import Control.Monad.Monitor (PropResult(..))
+import Control.Monad.Monitor.Class (Property, PropResult(..))
 
 -------------------------------------------------------------------------------
 
@@ -99,11 +96,11 @@ normalise f = f
 --
 -- - @Left ltl@: neither true nor false, the new formula should be
 --   checked against the subsequent execution.
-evaluateLTL :: Ord event => LTL event -> Set event -> Either (LTL event) Bool
+evaluateLTL :: Eq event => LTL event -> [event] -> Either (LTL event) Bool
 evaluateLTL ltl events = eval (normalise ltl) where
   eval (Bool b) = Right b
 
-  eval (Event event) = Right (event `S.member` events)
+  eval (Event event) = Right (event `elem` events)
 
   eval (Not phi) = case eval phi of
     Right b -> Right (not b)
@@ -153,7 +150,7 @@ evaluateLTL ltl events = eval (normalise ltl) where
 -- needed for LTL: LTL has no notion of \"true/false at the moment,
 -- but might change later\", which is allowed in @PropResult@ by the
 -- @CurrentlyTrue@ and @CurrentlyFalse@ constructors.
-propFromLTL :: Ord event => LTL event -> Set event -> PropResult event
+propFromLTL :: Eq event => LTL event -> Property event
 propFromLTL ltl events = case evaluateLTL ltl events of
   Right True  -> ProvenTrue
   Right False -> ProvenFalse

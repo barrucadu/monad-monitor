@@ -31,24 +31,20 @@ import qualified Control.Monad.Writer.Strict as WS (WriterT)
 --
 -- > startEvent foo >> isEventActive foo = startEvent foo >> pure True
 -- > stopEvent  foo >> isEventActive foo = stopEvent  foo >> pure False
---
--- With the exception that the actual functions may be implemented
--- differently for efficiency, or behave atomically, where properties
--- are not checked until the entire list has been processed.
---
 -- > startEvents foos = mapM_ startEvent foos
 -- > stopEvents foos = mapM_ stopEvent foos
+--
+-- With the exception that the actual @startEvents@ and @stopEvents@
+-- functions may be implemented differently for efficiency, or not
+-- properties are not checked until the entire list has been
+-- processed.
+
 class Monad m => MonadMonitor m where
   {-# MINIMAL
         (startEvent  | startEvents)
       , (stopEvent   | stopEvents)
       , (addProperty | addPropertyWithSeverity)
     #-}
-
-  -- | The type of properties. A property is something which can be
-  -- checked for consistency with the set of events active at a point
-  -- in time.
-  type Property m :: *
 
   -- | The type of events. An event is some situation which is
   -- currently happening.
@@ -82,7 +78,7 @@ class Monad m => MonadMonitor m where
   -- | Add a new property to the collection being monitored.
   --
   -- > addProperty = addPropertyWithSeverity Warn
-  addProperty :: Property m -> m ()
+  addProperty :: String -> Property (Event m) -> m ()
   addProperty = addPropertyWithSeverity Warn
 
   -- | Add a new property to the collection being monitored, with a
@@ -90,8 +86,33 @@ class Monad m => MonadMonitor m where
   -- on violation.
   --
   -- > addPropertyWithSeverity _ = addProperty
-  addPropertyWithSeverity :: Severity -> Property m -> m ()
+  addPropertyWithSeverity :: Severity -> String -> Property (Event m) -> m ()
   addPropertyWithSeverity _ = addProperty
+
+-------------------------------------------------------------------------------
+
+-- | A property is a function which takes all the currently active
+-- events and decides whether the property has been proven
+-- conclusively, is temporarily true or false, or there is not enough
+-- information.
+type Property event = [event] -> PropResult event
+
+-- | The result of checking a property.
+--
+-- There are two types of results: proven results, and current
+-- results. If a property evaluates to a proven result, this will
+-- never change, and so it can be removed from the set that is
+-- checked.
+--
+-- A current result contains a property to replace the current
+-- one. This allows properties to evolve with the system being
+-- monitored.
+data PropResult event
+  = ProvenTrue
+  | ProvenFalse
+  | CurrentlyTrue  (Property event)
+  | CurrentlyFalse (Property event)
+  | Neither (Property event)
 
 -------------------------------------------------------------------------------
 
@@ -107,7 +128,6 @@ instance NFData Severity where
 -------------------------------------------------------------------------------
 
 instance MonadMonitor m => MonadMonitor (MaybeT m) where
-  type Property (MaybeT m) = Property m
   type Event (MaybeT m) = Event m
 
   startEvent = lift . startEvent
@@ -116,11 +136,10 @@ instance MonadMonitor m => MonadMonitor (MaybeT m) where
   startEvents = lift . startEvents
   stopEvents  = lift . stopEvents
 
-  addProperty = lift . addProperty
-  addPropertyWithSeverity severity = lift . addPropertyWithSeverity severity
+  addProperty msg = lift . addProperty msg
+  addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
 
 instance MonadMonitor m => MonadMonitor (ListT m) where
-  type Property (ListT m) = Property m
   type Event (ListT m) = Event m
 
   startEvent = lift . startEvent
@@ -129,12 +148,11 @@ instance MonadMonitor m => MonadMonitor (ListT m) where
   startEvents = lift . startEvents
   stopEvents  = lift . stopEvents
 
-  addProperty = lift . addProperty
-  addPropertyWithSeverity severity = lift . addPropertyWithSeverity severity
+  addProperty msg = lift . addProperty msg
+  addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
 
 instance MonadMonitor m => MonadMonitor (ReaderT r m) where
-  type Property (ReaderT r m) = Property m
-  type Event   (ReaderT r m) = Event   m
+  type Event (ReaderT r m) = Event   m
 
   startEvent = lift . startEvent
   stopEvent  = lift . stopEvent
@@ -142,11 +160,10 @@ instance MonadMonitor m => MonadMonitor (ReaderT r m) where
   startEvents = lift . startEvents
   stopEvents  = lift . stopEvents
 
-  addProperty = lift . addProperty
-  addPropertyWithSeverity severity = lift . addPropertyWithSeverity severity
+  addProperty msg = lift . addProperty msg
+  addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
 
 instance (MonadMonitor m, Monoid w) => MonadMonitor (WL.WriterT w m) where
-  type Property (WL.WriterT w m) = Property m
   type Event (WL.WriterT w m) = Event m
 
   startEvent = lift . startEvent
@@ -155,11 +172,10 @@ instance (MonadMonitor m, Monoid w) => MonadMonitor (WL.WriterT w m) where
   startEvents = lift . startEvents
   stopEvents  = lift . stopEvents
 
-  addProperty = lift . addProperty
-  addPropertyWithSeverity severity = lift . addPropertyWithSeverity severity
+  addProperty msg = lift . addProperty msg
+  addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
 
 instance (MonadMonitor m, Monoid w) => MonadMonitor (WS.WriterT w m) where
-  type Property (WS.WriterT w m) = Property m
   type Event (WS.WriterT w m) = Event m
 
   startEvent = lift . startEvent
@@ -168,11 +184,10 @@ instance (MonadMonitor m, Monoid w) => MonadMonitor (WS.WriterT w m) where
   startEvents = lift . startEvents
   stopEvents  = lift . stopEvents
 
-  addProperty = lift . addProperty
-  addPropertyWithSeverity severity = lift . addPropertyWithSeverity severity
+  addProperty msg = lift . addProperty msg
+  addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
 
 instance MonadMonitor m => MonadMonitor (SL.StateT s m) where
-  type Property (SL.StateT s m) = Property m
   type Event (SL.StateT s m) = Event m
 
   startEvent = lift . startEvent
@@ -181,11 +196,10 @@ instance MonadMonitor m => MonadMonitor (SL.StateT s m) where
   startEvents = lift . startEvents
   stopEvents  = lift . stopEvents
 
-  addProperty = lift . addProperty
-  addPropertyWithSeverity severity = lift . addPropertyWithSeverity severity
+  addProperty msg = lift . addProperty msg
+  addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
 
 instance MonadMonitor m => MonadMonitor (SS.StateT s m) where
-  type Property (SS.StateT s m) = Property m
   type Event (SS.StateT s m) = Event m
 
   startEvent = lift . startEvent
@@ -194,11 +208,10 @@ instance MonadMonitor m => MonadMonitor (SS.StateT s m) where
   startEvents = lift . startEvents
   stopEvents  = lift . stopEvents
 
-  addProperty = lift . addProperty
-  addPropertyWithSeverity severity = lift . addPropertyWithSeverity severity
+  addProperty msg = lift . addProperty msg
+  addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
 
 instance (MonadMonitor m, Monoid w) => MonadMonitor (RL.RWST r w s m) where
-  type Property (RL.RWST r w s m) = Property m
   type Event (RL.RWST r w s m) = Event m
 
   startEvent = lift . startEvent
@@ -207,11 +220,10 @@ instance (MonadMonitor m, Monoid w) => MonadMonitor (RL.RWST r w s m) where
   startEvents = lift . startEvents
   stopEvents  = lift . stopEvents
 
-  addProperty = lift . addProperty
-  addPropertyWithSeverity severity = lift . addPropertyWithSeverity severity
+  addProperty msg = lift . addProperty msg
+  addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
 
 instance (MonadMonitor m, Monoid w) => MonadMonitor (RS.RWST r w s m) where
-  type Property (RS.RWST r w s m) = Property m
   type Event (RS.RWST r w s m) = Event m
 
   startEvent = lift . startEvent
@@ -220,5 +232,5 @@ instance (MonadMonitor m, Monoid w) => MonadMonitor (RS.RWST r w s m) where
   startEvents = lift . startEvents
   stopEvents  = lift . stopEvents
 
-  addProperty = lift . addProperty
-  addPropertyWithSeverity severity = lift . addPropertyWithSeverity severity
+  addProperty msg = lift . addProperty msg
+  addPropertyWithSeverity sev msg = lift . addPropertyWithSeverity sev msg
