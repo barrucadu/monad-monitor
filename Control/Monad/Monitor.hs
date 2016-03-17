@@ -32,7 +32,6 @@ module Control.Monad.Monitor
 
 import Control.Arrow (first, second)
 import Control.Concurrent.STM.CTVar (modifyCTVar')
-import Control.DeepSeq (NFData(..))
 import Control.Monad (join)
 import Control.Monad.Catch (MonadThrow(..), MonadCatch(..), MonadMask(..))
 import Control.Monad.Conc.Class (MonadConc(..))

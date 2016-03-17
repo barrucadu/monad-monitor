@@ -38,6 +38,8 @@ module Control.Monad.Monitor.Property
   , globally
   ) where
 
+import Control.DeepSeq (NFData(..))
+
 -------------------------------------------------------------------------------
 
 -- | The type of linear temporal logic formulae.
@@ -65,6 +67,16 @@ data Property event
   -- to and including the point where @phi@ does, but @phi@ does not
   -- necessarily ever need to hold.
   deriving (Eq, Read, Show)
+
+instance NFData event => NFData (Property event) where
+  rnf (Release p1 p2) = rnf (p1, p2)
+  rnf (Until   p1 p2) = rnf (p1, p2)
+  rnf (And p1 p2) = rnf (p1, p2)
+  rnf (Or  p1 p2) = rnf (p1, p2)
+  rnf (Bool  b) = rnf b
+  rnf (Event e) = rnf e
+  rnf (Next  p) = rnf p
+  rnf (Not   p) = rnf p
 
 -- | @finally phi@ expresses that @phi@ has to hold somewhere on
 -- the subsequent path.
