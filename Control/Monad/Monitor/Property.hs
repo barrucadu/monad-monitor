@@ -66,7 +66,7 @@ data Property event
   -- ^ @Release phi psi@ expresses that the formula @psi@ must hold up
   -- to and including the point where @phi@ does, but @phi@ does not
   -- necessarily ever need to hold.
-  deriving (Eq, Read, Show)
+  deriving (Eq, Ord, Read, Show)
 
 instance NFData event => NFData (Property event) where
   rnf (Release p1 p2) = rnf (p1, p2)
