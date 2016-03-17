@@ -104,7 +104,10 @@ normalise f = f
 --
 -- - @Left prop@: neither true nor false, the new formula should be
 --   checked against the subsequent execution.
-evaluateProp :: Eq event => Property event -> [event] -> Either (Property event) Bool
+evaluateProp :: (Eq event, Foldable f)
+  => Property event
+  -> f event
+  -> Either (Property event) Bool
 evaluateProp prop events = eval (normalise prop) where
   eval (Bool b) = Right b
 

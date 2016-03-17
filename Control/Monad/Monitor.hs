@@ -386,7 +386,7 @@ checkAll :: (Monad m, Eq event)
   -> (Severity -> String -> m ())
   -> m ()
 checkAll getEvents getProps setProps logf = do
-  es <- S.toList <$> getEvents
+  es <- getEvents
   ps <- getProps
   ps' <- mapM (check es) ps
   setProps (catMaybes ps')
