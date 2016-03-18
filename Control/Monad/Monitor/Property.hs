@@ -2,8 +2,8 @@
 -- monitoring program executions.
 --
 -- LTL is a logic for talking about time, in addition to the normal
--- true/false/and/or/not operations it has some expressing properties
--- of the future evolution of the system:
+-- true, false, and, or, not operations it has some expressing
+-- properties of the future evolution of the system:
 --
 -- - @X φ@ (or 'Next') expresses that the formula @φ@ must hold in the
 --   next time step. In the case of this library, that will be after
@@ -88,9 +88,8 @@ finally = Until (Bool True)
 globally :: Property event -> Property event
 globally = Not . finally . Not
 
--- | Normalise a given formula: push @Not@s in as far as possible;
--- convert between @Release@/@Until@ and @And@/@Or@, and normalise all
--- subexpressions.
+-- | Convert a formula into negation normal form: push @Not@s in as
+-- far as possible, converting between operators as necessary.
 normalise :: Property a -> Property a
 normalise (Next phi) = Next (normalise phi)
 normalise (phi `Until` psi) = normalise phi `Until` normalise psi
