@@ -67,13 +67,13 @@ import Control.Monad.Monitor.Property
 -- set of active events.
 newtype MonitoringT event m a = MonitoringT
   { unMonitoringT
-    :: (Severity -> String -> m ())
+    :: (Severity -> String -> MonitoringT event m ())
     -> StateT (MonitoringState event) m a
   }
 
 -- | Run a 'MonitoringT' action with the supplied logging function.
-  => (Severity -> String -> m ())
 runMonitoringT :: (Monad m, Ord event)
+  => (Severity -> String -> MonitoringT event m ())
   -> MonitoringT event m a
   -> m a
 runMonitoringT logf (MonitoringT ma) =
@@ -133,7 +133,7 @@ instance (MonadMask m, Ord event) => MonadMask (MonitoringT event m) where
     where q u (MonitoringT b) = MonitoringT (u . b)
 
 instance (Monad m, Ord event) => MonadMonitor event (MonitoringT event m) where
-  startEvents es = MonitoringT $ \logf -> do
+  startEvents es = join . MonitoringT $ \logf -> do
     s <- get
     let s' = s { events  = S.union (events  s) (S.fromList es)
                , allseen = S.union (allseen s) (S.fromList es)
@@ -143,26 +143,27 @@ instance (Monad m, Ord event) => MonadMonitor event (MonitoringT event m) where
           else s'
     stateCheckProps logf
 
-  stopEvents es = MonitoringT $ \logf -> do
+  stopEvents es = join . MonitoringT $ \logf -> do
     modify (\s -> s { events = S.difference (events s) (S.fromList es) })
     stateCheckProps logf
 
-  addPropertyWithSeverity severity name checker = MonitoringT $ \logf -> do
-    modify (\s -> s { properties = (name, severity, checker) : properties s })
-    stateCheckProps logf
+  addPropertyWithSeverity severity name checker = join . MonitoringT $
+    \logf -> do
+      modify (\s -> s { properties = (name, severity, checker) : properties s })
+      stateCheckProps logf
 
   addTemplate template = MonitoringT $ \_ ->
     modify (addstantiateTemplate template)
 
 -- | Check properties and do logging.
-stateCheckProps :: (Monad m, Eq event)
-  => (Severity -> String -> m ())
-  -> StateT (MonitoringState event) m ()
+stateCheckProps :: (Monad m, Ord event)
+  => (Severity -> String -> MonitoringT event m ())
+  -> StateT (MonitoringState event) m (MonitoringT event m ())
 stateCheckProps logf = do
   state <- get
   let (props, loga) = checkProperties state logf
   put (state { properties = props })
-  lift loga
+  pure loga
 
 -------------------------------------------------------------------------------
 
@@ -171,14 +172,14 @@ stateCheckProps logf = do
 newtype ConcurrentMonitoringT event m a = ConcurrentMonitoringT
   { unConcurrentMonitoringT
     :: CTVar (STMLike m) (MonitoringState event)
-    -> (Severity -> String -> m ())
+    -> (Severity -> String -> ConcurrentMonitoringT event m ())
     -> m a
   }
 
 -- | Run a 'ConcurrentMonitoringT' action with the supplied logging
 -- function.
-  => (Severity -> String -> m ())
 runConcurrentMonitoringT :: (MonadConc m, Ord event)
+  => (Severity -> String -> ConcurrentMonitoringT event m ())
   -> ConcurrentMonitoringT event m a
   -> m a
 runConcurrentMonitoringT logf (ConcurrentMonitoringT ma) = do
@@ -322,8 +323,8 @@ concurrentt' f ma = ConcurrentMonitoringT $ \var logf ->
   f (\g -> unConcurrentMonitoringT (ma $ concurrentt g) var logf)
 
 instance (MonadConc m, Ord event) => MonadMonitor event (ConcurrentMonitoringT event m) where
-  startEvents es = ConcurrentMonitoringT $
-    \var logf -> join . atomically $ do
+  startEvents es = join . ConcurrentMonitoringT $
+    \var logf -> atomically $ do
       s <- readCTVar var
       let s' = s { events  = S.union (events  s) (S.fromList es)
                  , allseen = S.union (allseen s) (S.fromList es)
@@ -333,13 +334,13 @@ instance (MonadConc m, Ord event) => MonadMonitor event (ConcurrentMonitoringT e
                        else s'
       stmCheckProps var logf
 
-  stopEvents es = ConcurrentMonitoringT $
-    \var logf -> join . atomically $ do
+  stopEvents es = join . ConcurrentMonitoringT $
+    \var logf -> atomically $ do
       modifyCTVar var (\s -> s { events = S.difference (events s) (S.fromList es) })
       stmCheckProps var logf
 
-  addPropertyWithSeverity severity name checker = ConcurrentMonitoringT $
-    \var logf -> join . atomically $ do
+  addPropertyWithSeverity severity name checker = join . ConcurrentMonitoringT $
+    \var logf -> atomically $ do
       modifyCTVar var (\s -> s { properties = (name, severity, checker) : properties s })
       stmCheckProps var logf
 
@@ -347,10 +348,10 @@ instance (MonadConc m, Ord event) => MonadMonitor event (ConcurrentMonitoringT e
     modifyCTVar var (addstantiateTemplate template)
 
 -- | Check properties and do logging.
-stmCheckProps :: (MonadConc m, Eq event)
+stmCheckProps :: (MonadConc m, Ord event)
   => CTVar (STMLike m) (MonitoringState event)
-  -> (Severity -> String -> m ())
-  -> STMLike m (m ())
+  -> (Severity -> String -> ConcurrentMonitoringT event m ())
+  -> STMLike m (ConcurrentMonitoringT event m ())
 stmCheckProps var logf = do
   state <- readCTVar var
   let (props, loga) = checkProperties state logf
