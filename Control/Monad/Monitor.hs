@@ -65,10 +65,6 @@ import Control.Monad.Monitor.Property
 
 -- | Monad transformer that adds monitoring functionality, based on a
 -- set of active events.
---
--- The monitoring behaviour here is to check properties hold after all
--- the 'MonadMonitor' operations. A function is required to deal with
--- failed properties.
 newtype MonitoringT event m a = MonitoringT
   { unMonitoringT
     :: (Severity -> String -> m ())
@@ -169,10 +165,6 @@ stateCheckProps logf = do
 
 -- | Monad transformer that adds monitoring functionality to
 -- concurrency monads, based on a shared mutable set of active events.
---
--- The monitoring behaviour here is to check properties hold after all
--- the 'MonadMonitor' operations. A function is required to deal with
--- failed properties.
 newtype ConcurrentMonitoringT event m a = ConcurrentMonitoringT
   { unConcurrentMonitoringT
     :: CTVar (STMLike m) (MonitoringState event)
