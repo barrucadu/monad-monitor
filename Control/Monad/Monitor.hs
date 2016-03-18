@@ -72,28 +72,28 @@ newtype MonitoringT event m a = MonitoringT
   }
 
 -- | Run a 'MonitoringT' action with the supplied logging function.
-runMonitoringT :: Monad m
   => (Severity -> String -> m ())
+runMonitoringT :: (Monad m, Ord event)
   -> MonitoringT event m a
   -> m a
 runMonitoringT logf (MonitoringT ma) =
   evalStateT (ma logf) initialMonitoringState
 
 -- | Run a 'MonitoringT' action which prints messages to stdout.
-runStdoutMonitoringT :: MonadIO m => MonitoringT event m a -> m a
+runStdoutMonitoringT :: (MonadIO m, Ord event) => MonitoringT event m a -> m a
 runStdoutMonitoringT = runHandleMonitoringT stdout
 
 -- | Run a 'MonitoringT' action which prints messages to stderr.
-runStderrMonitoringT :: MonadIO m => MonitoringT event m a -> m a
+runStderrMonitoringT :: (MonadIO m, Ord event) => MonitoringT event m a -> m a
 runStderrMonitoringT = runHandleMonitoringT stderr
 
 -- | Run a 'MonitoringT' action which prints messages to a handle.
-runHandleMonitoringT :: MonadIO m => Handle -> MonitoringT event m a -> m a
+runHandleMonitoringT :: (MonadIO m, Ord event) => Handle -> MonitoringT event m a -> m a
 runHandleMonitoringT handle = runMonitoringT $ \severity message ->
-  case severity of
-    Info  -> liftIO . hPutStrLn handle $ "[info] "  ++ message
-    Warn  -> liftIO . hPutStrLn handle $ "[warn] "  ++ message
-    Error -> liftIO . hPutStrLn handle $ "[error] " ++ message
+  liftIO . hPutStrLn handle $ case severity of
+    Info  -> "[info] "  ++ message
+    Warn  -> "[warn] "  ++ message
+    Error -> "[error] " ++ message
 
 instance Ord event => MonadTrans (MonitoringT event) where
   lift ma = MonitoringT $ \_ -> lift ma
@@ -114,6 +114,9 @@ instance (Monad m, Ord event) => Monad (MonitoringT event m) where
     a <- ma logf
     let MonitoringT f' = f a
     f' logf
+
+instance (MonadIO m, Ord event) => MonadIO (MonitoringT event m) where
+  liftIO = lift . liftIO
 
 instance (MonadThrow m, Ord event) => MonadThrow (MonitoringT event m) where
   throwM = lift . throwM
@@ -174,8 +177,8 @@ newtype ConcurrentMonitoringT event m a = ConcurrentMonitoringT
 
 -- | Run a 'ConcurrentMonitoringT' action with the supplied logging
 -- function.
-runConcurrentMonitoringT :: MonadConc m
   => (Severity -> String -> m ())
+runConcurrentMonitoringT :: (MonadConc m, Ord event)
   -> ConcurrentMonitoringT event m a
   -> m a
 runConcurrentMonitoringT logf (ConcurrentMonitoringT ma) = do
@@ -189,34 +192,34 @@ data PropertyViolation event = PropertyViolation !Severity event
 
 -- | Run a 'ConcurrentMonitoringT' which uses '_concMessage' to record
 -- messages as a 'PropertyViolation'.
-runTracedConcurrentMonitoringT :: (MonadConc m, Typeable event)
+runTracedConcurrentMonitoringT :: (MonadConc m, Typeable event, Ord event)
   => ConcurrentMonitoringT event m a
   -> m a
 runTracedConcurrentMonitoringT = runConcurrentMonitoringT $ \sev msg ->
   _concMessage (PropertyViolation sev msg)
 
 -- | Run a 'ConcurrentMonitoringT' action which prints messages to stdout.
-runStdoutConcurrentMonitoringT :: (MonadConc m, MonadIO m)
+runStdoutConcurrentMonitoringT :: (MonadConc m, MonadIO m, Ord event)
   => ConcurrentMonitoringT event m a
   -> m a
 runStdoutConcurrentMonitoringT = runHandleConcurrentMonitoringT stdout
 
 -- | Run a 'ConcurrentMonitoringT' action which prints messages to stderr.
-runStderrConcurrentMonitoringT :: (MonadConc m, MonadIO m)
+runStderrConcurrentMonitoringT :: (MonadConc m, MonadIO m, Ord event)
   => ConcurrentMonitoringT event m a
   -> m a
 runStderrConcurrentMonitoringT = runHandleConcurrentMonitoringT stderr
 
 -- | Run a 'ConcurrentMonitoringT' action which prints messages to a handle.
-runHandleConcurrentMonitoringT :: (MonadConc m, MonadIO m)
+runHandleConcurrentMonitoringT :: (MonadConc m, MonadIO m, Ord event)
   => Handle
   -> ConcurrentMonitoringT event m a
   -> m a
 runHandleConcurrentMonitoringT handle = runConcurrentMonitoringT $ \sev msg ->
-  case sev of
-    Info  -> liftIO . hPutStrLn handle $ "[info] "  ++ msg
-    Warn  -> liftIO . hPutStrLn handle $ "[warn] "  ++ msg
-    Error -> liftIO . hPutStrLn handle $ "[error] " ++ msg
+  liftIO . hPutStrLn handle $ case sev of
+    Info  -> "[info] "  ++ msg
+    Warn  -> "[warn] "  ++ msg
+    Error -> "[error] " ++ msg
 
 instance Ord event => MonadTrans (ConcurrentMonitoringT event) where
   lift ma = ConcurrentMonitoringT $ \_ _ -> ma
@@ -238,6 +241,9 @@ instance (MonadConc m, Ord event) => Monad (ConcurrentMonitoringT event m) where
     a <- ma var logf
     let ConcurrentMonitoringT f' = f a
     f' var logf
+
+instance (MonadIO m, MonadConc m, Ord event) => MonadIO (ConcurrentMonitoringT event m) where
+  liftIO = lift . liftIO
 
 instance (MonadConc m, Ord event) => MonadThrow (ConcurrentMonitoringT event m) where
   throwM = lift . throwM
@@ -371,6 +377,9 @@ instance Monad m => Monad (NoMonitoringT m) where
   return = pure
 
   NoMonitoringT ma >>= f = NoMonitoringT (ma >>= runNoMonitoringT . f)
+
+instance MonadIO m => MonadIO (NoMonitoringT m) where
+  liftIO = lift . liftIO
 
 instance MonadThrow m => MonadThrow (NoMonitoringT m) where
   throwM = lift . throwM
