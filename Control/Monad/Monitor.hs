@@ -474,7 +474,11 @@ checkProperties state logf = (newProps, logAct) where
   checked = map (check (events state)) (properties state)
 
   -- Check a single property against the events
-  check es (name, severity, prop) = case evaluateProp prop es of
-    Right True  -> Right Nothing
-    Right False -> Right (Just (logf severity name))
+  --
+  -- For now, just drop properties which evaluate to a \"possibly\"
+  -- result.
+  check es (name, severity, prop) = case evaluate prop es of
+    Right (Certainly True)  -> Right Nothing
+    Right (Certainly False) -> Right (Just (logf severity name))
+    Right (Possibly _) -> Right Nothing
     Left  prop' -> Left (name, severity, prop')

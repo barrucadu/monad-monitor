@@ -10,9 +10,18 @@
 module Control.Monad.Monitor.Class
   ( MonadMonitor(..)
   -- * Properties
-  , Template
-  , Property(..)
+
+  -- | See Control.Monad.Monitor.Property for fuller documentation.
+
+  , Property
+  , StateProp(..)
+  , PathProp(..)
   , Severity(..)
+
+  -- * Templates
+  , Template
+  , subsetTemplate
+  , powersetTemplate
   ) where
 
 import Control.DeepSeq (NFData(..))
