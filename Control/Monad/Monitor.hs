@@ -400,6 +400,7 @@ instance Monad f => MonadMonitor Void (NoMonitoringT f) where
   startEvents _ = pure ()
   stopEvents  _ = pure ()
   addPropertyWithSeverity _ _ _ = pure ()
+  addTemplate _ = pure ()
 
 -------------------------------------------------------------------------------
 
