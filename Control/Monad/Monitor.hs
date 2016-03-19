@@ -9,10 +9,18 @@ module Control.Monad.Monitor
   , Severity(..)
 
   -- * Properties
-  , Property(..)
+
+  -- | See Control.Monad.Monitor.Property for fuller documentation.
+
+  , Property
+  , StateProp(..)
+  , PathProp(..)
+  , Severity(..)
+
+  -- * Templates
   , Template
-  , finally
-  , globally
+  , subsetTemplate
+  , powersetTemplate
 
     -- * Helper transformers
   , MonitoringT(..)
