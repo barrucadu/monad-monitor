@@ -6,7 +6,6 @@
 module Control.Monad.Monitor
   ( -- * @MonadMonitor@
     MonadMonitor(..)
-  , Severity(..)
 
   -- * Properties
 
@@ -58,7 +57,7 @@ import Control.Monad.Trans (MonadTrans(..))
 import Data.Either (lefts, rights)
 import Data.Foldable (sequenceA_)
 import Data.List (foldl')
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (catMaybes)
 import Data.Set (Set)
 import qualified Data.Set as S
 import Data.Typeable
@@ -480,13 +479,13 @@ checkProperties state logf = (newProps, logAct) where
   logAct   = (sequenceA_ . catMaybes . rights) checked
 
   -- Check all properties against the events
-  checked = map (check (events state)) (properties state)
+  checked = map (checkP (events state)) (properties state)
 
   -- Check a single property against the events
   --
   -- For now, just drop properties which evaluate to a \"possibly\"
   -- result.
-  check es (name, severity, prop) = case evaluate prop es of
+  checkP es (name, severity, prop) = case evaluate prop es of
     Right (Certainly True)  -> Right Nothing
     Right (Certainly False) -> Right (Just (logf severity name))
     Right (Possibly _) -> Right Nothing
