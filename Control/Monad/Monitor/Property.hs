@@ -67,9 +67,11 @@ module Control.Monad.Monitor.Property
   , mor
   , modal
   , modalBool
+  , combine
   ) where
 
 import Control.DeepSeq (NFData(..))
+import Data.Semigroup(Semigroup(..))
 
 -------------------------------------------------------------------------------
 -- State and path formulae
@@ -202,12 +204,41 @@ normalise = normaliseSP where
 -- execution with a different sequence of events, the properties could
 -- have evolved in a different way giving the other result. Only by
 -- examining all results can a possibility become a certainty.
+--
+-- All of the operations which act on two @Modal@ values (such as
+-- '<>', '<*>', and '>>=') downgrade the certainty if one argument is
+-- @Possibly@.
 data Modal a = Certainly a | Possibly a
   deriving (Eq, Ord, Read, Show, Functor)
 
 instance NFData a => NFData (Modal a) where
   rnf (Certainly b) = rnf b
   rnf (Possibly  b) = rnf b
+
+instance Semigroup a => Semigroup (Modal a) where
+  (<>) = combine (Data.Semigroup.<>)
+
+instance (Semigroup a, Monoid a) => Monoid (Modal a) where
+  mappend = (Data.Semigroup.<>)
+  mempty = Certainly mempty
+
+instance Applicative Modal where
+  pure = Certainly
+  (<*>) = combine ($)
+
+instance Monad Modal where
+  return = pure
+  Certainly a >>= f = f a
+  Possibly a >>= f = case f a of
+    Certainly x -> Possibly x
+    x -> x
+
+instance Foldable Modal where
+  foldMap f = f . modal id id
+
+instance Traversable Modal where
+  traverse f (Certainly a) = Certainly <$> f a
+  traverse f (Possibly  a) = Possibly  <$> f a
 
 -- | Logical negation.
 mnot :: Modal Bool -> Modal Bool
@@ -216,17 +247,11 @@ mnot (Possibly  b) = Certainly (not b)
 
 -- | Logical conjunction.
 mand :: Modal Bool -> Modal Bool -> Modal Bool
-mand (Certainly b1) (Certainly b2) = Certainly (b1 && b2)
-mand (Certainly b1) (Possibly  b2) = Possibly  (b1 && b2)
-mand (Possibly  b1) (Certainly b2) = Possibly  (b1 && b2)
-mand (Possibly  b1) (Possibly  b2) = Possibly  (b1 && b2)
+mand = combine (&&)
 
 -- | Logical disjunction
 mor :: Modal Bool -> Modal Bool -> Modal Bool
-mor (Certainly b1) (Certainly b2) = Certainly (b1 || b2)
-mor (Certainly b1) (Possibly  b2) = Possibly  (b1 || b2)
-mor (Possibly  b1) (Certainly b2) = Possibly  (b1 || b2)
-mor (Possibly  b1) (Possibly  b2) = Possibly  (b1 || b2)
+mor = combine (||)
 
 -- | Eliminate a @Modal@.
 modal :: (a -> b) -> (a -> b) -> Modal a -> b
@@ -237,6 +262,14 @@ modal _ f (Possibly  a) = f a
 modalBool :: a -> a -> a -> a -> Modal Bool -> a
 modalBool ct cf pt pf =
   modal (\b -> if b then ct else cf) (\b -> if b then pt else pf)
+
+-- | Combine two @Modal@ values by downgrading the certainty to the
+-- weakest of the two.
+combine :: (a -> b -> c) -> Modal a -> Modal b -> Modal c
+combine f (Certainly b1) (Certainly b2) = Certainly (f b1 b2)
+combine f (Certainly b1) (Possibly  b2) = Possibly  (f b1 b2)
+combine f (Possibly  b1) (Certainly b2) = Possibly  (f b1 b2)
+combine f (Possibly  b1) (Possibly  b2) = Possibly  (f b1 b2)
 
 -------------------------------------------------------------------------------
 

@@ -26,6 +26,7 @@ module Control.Monad.Monitor.Class
 
 import Control.DeepSeq (NFData(..))
 import Control.Monad (filterM)
+import Data.Semigroup (Semigroup(..))
 import Data.Set (Set)
 import qualified Data.Set as S
 
@@ -127,11 +128,20 @@ class (Monad m, Ord event) => MonadMonitor event m | m -> event where
 -- | Severities for property violations. No specific meaning is
 -- attached to these here, beyond the obvious intuitive ordering of
 -- \"badness\".
+--
+-- The '<>' and 'mappend' functions upgrade the severity.
 data Severity = Info | Warn | Error
   deriving (Eq, Ord, Show, Read, Enum, Bounded)
 
 instance NFData Severity where
   rnf s = s `seq` ()
+
+instance Semigroup Severity where
+  a <> b = if a > b then a else b
+
+instance Monoid Severity where
+  mappend = (Data.Semigroup.<>)
+  mempty = Info
 
 -------------------------------------------------------------------------------
 

@@ -28,6 +28,7 @@ library
                      , dejafu
                      , exceptions
                      , mtl
+                     , semigroups
                      , transformers
                      , void
   -- hs-source-dirs:      
