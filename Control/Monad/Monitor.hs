@@ -144,6 +144,7 @@ instance (Monad m, Ord event) => MonadMonitor event (MonitoringT event m) where
     s <- get
     let s' = s { events  = S.union (events  s) (S.fromList es)
                , allseen = S.union (allseen s) (S.fromList es)
+               , evtrace = Start es : evtrace s
                }
     put $ if any (`S.notMember` allseen s') es
           then instantiateTemplates s'
@@ -151,7 +152,10 @@ instance (Monad m, Ord event) => MonadMonitor event (MonitoringT event m) where
     stateCheckProps logf
 
   stopEvents es = join . MonitoringT $ \logf -> do
-    modify (\s -> s { events = S.difference (events s) (S.fromList es) })
+    modify (\s -> s { events  = S.difference (events s) (S.fromList es)
+                    , evtrace = Stop es : evtrace s
+                    }
+           )
     stateCheckProps logf
 
   addPropertyWithSeverity severity name checker = join . MonitoringT $
@@ -335,6 +339,7 @@ instance (MonadConc m, Ord event) => MonadMonitor event (ConcurrentMonitoringT e
       s <- readCTVar var
       let s' = s { events  = S.union (events  s) (S.fromList es)
                  , allseen = S.union (allseen s) (S.fromList es)
+                 , evtrace = Start es : evtrace s
                  }
       writeCTVar var $ if any (`S.notMember` allseen s') es
                        then instantiateTemplates s'
@@ -343,7 +348,10 @@ instance (MonadConc m, Ord event) => MonadMonitor event (ConcurrentMonitoringT e
 
   stopEvents es = join . ConcurrentMonitoringT $
     \var logf -> atomically $ do
-      modifyCTVar var (\s -> s { events = S.difference (events s) (S.fromList es) })
+      modifyCTVar var (\s -> s { events  = S.difference (events s) (S.fromList es)
+                               , evtrace = Stop es : evtrace s
+                               }
+                      )
       stmCheckProps var logf
 
   addPropertyWithSeverity severity name checker = join . ConcurrentMonitoringT $
@@ -411,6 +419,9 @@ instance Monad f => MonadMonitor Void (NoMonitoringT f) where
 
 -------------------------------------------------------------------------------
 
+-- | What was done with some events. Used to generate the trace.
+data TraceItem event = Start [event] | Stop [event]
+
 -- | State for the 'MonitoringT' and 'ConcurrentMonitoringT'
 -- transformers.
 data MonitoringState event = MonitoringState
@@ -418,6 +429,8 @@ data MonitoringState event = MonitoringState
   -- ^ The active events.
   , allseen :: Set event
   -- ^ All events that have been seen.
+  , evtrace :: [TraceItem event]
+  -- ^ The trace of events, built up in reverse order for efficiency.
   , properties :: [(String, Severity, Property event)]
   -- ^ The properties.
   , templates :: [Template event]
@@ -431,6 +444,7 @@ initialMonitoringState :: MonitoringState event
 initialMonitoringState = MonitoringState
   { events = S.empty
   , allseen = S.empty
+  , evtrace = []
   , properties = []
   , templates = []
   , genprops = S.empty
