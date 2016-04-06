@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE RankNTypes #-}
@@ -46,7 +47,9 @@ module Control.Monad.Monitor
   , checkProperties
   ) where
 
+import Control.Arrow ((***))
 import Control.Concurrent.STM.CTVar (readCTVar, modifyCTVar, writeCTVar)
+import Control.DeepSeq (NFData(..))
 import Control.Monad (join)
 import Control.Monad.Catch (MonadThrow(..), MonadCatch(..), MonadMask(..))
 import Control.Monad.Conc.Class (MonadConc(..))
@@ -57,6 +60,8 @@ import Control.Monad.Trans (MonadTrans(..))
 import Data.Either (lefts, rights)
 import Data.Foldable (sequenceA_)
 import Data.List (foldl')
+import Data.Map (Map)
+import qualified Data.Map as M
 import Data.Maybe (catMaybes)
 import Data.Set (Set)
 import qualified Data.Set as S
@@ -146,7 +151,7 @@ instance (Monad m, Ord event) => MonadMonitor event (MonitoringT event m) where
                , allseen = S.union (allseen s) (S.fromList es)
                , evtrace = Start es : evtrace s
                }
-    put $ if any (`S.notMember` allseen s') es
+    put $ if any (`S.notMember` allseen s) es
           then instantiateTemplates s'
           else s'
     stateCheckProps logf
@@ -160,7 +165,7 @@ instance (Monad m, Ord event) => MonadMonitor event (MonitoringT event m) where
 
   addPropertyWithSeverity severity name checker = join . MonitoringT $
     \logf -> do
-      modify (\s -> s { properties = (name, severity, checker) : properties s })
+      modify (addProp name severity checker)
       stateCheckProps logf
 
   addTemplate template = MonitoringT $ \_ ->
@@ -172,8 +177,8 @@ stateCheckProps :: (Monad m, Ord event)
   -> StateT (MonitoringState event) m (MonitoringT event m ())
 stateCheckProps logf = do
   state <- get
-  let (props, loga) = checkProperties state logf
-  put (state { properties = props })
+  let (state', loga) = checkProperties state logf
+  put state'
   pure loga
 
 -------------------------------------------------------------------------------
@@ -341,7 +346,7 @@ instance (MonadConc m, Ord event) => MonadMonitor event (ConcurrentMonitoringT e
                  , allseen = S.union (allseen s) (S.fromList es)
                  , evtrace = Start es : evtrace s
                  }
-      writeCTVar var $ if any (`S.notMember` allseen s') es
+      writeCTVar var $ if any (`S.notMember` allseen s) es
                        then instantiateTemplates s'
                        else s'
       stmCheckProps var logf
@@ -356,7 +361,7 @@ instance (MonadConc m, Ord event) => MonadMonitor event (ConcurrentMonitoringT e
 
   addPropertyWithSeverity severity name checker = join . ConcurrentMonitoringT $
     \var logf -> atomically $ do
-      modifyCTVar var (\s -> s { properties = (name, severity, checker) : properties s })
+      modifyCTVar var (addProp name severity checker)
       stmCheckProps var logf
 
   addTemplate template = ConcurrentMonitoringT $ \var _ -> atomically $
@@ -369,8 +374,8 @@ stmCheckProps :: (MonadConc m, Ord event)
   -> STMLike m (ConcurrentMonitoringT event m ())
 stmCheckProps var logf = do
   state <- readCTVar var
-  let (props, loga) = checkProperties state logf
-  writeCTVar var (state { properties = props })
+  let (state', loga) = checkProperties state logf
+  writeCTVar var state'
   pure loga
 
 -------------------------------------------------------------------------------
@@ -431,13 +436,30 @@ data MonitoringState event = MonitoringState
   -- ^ All events that have been seen.
   , evtrace :: [TraceItem event]
   -- ^ The trace of events, built up in reverse order for efficiency.
-  , properties :: [(String, Severity, Property event)]
-  -- ^ The properties.
+  , properties :: Map (Property event) (String, Severity, PropState event)
+  -- ^ Properties are stored in a map where the keys are the original
+  -- (as introduced by the programmer) properties, and the values
+  -- contain the current state of the property. This allows easy
+  -- mapping from the final result to the original property which
+  -- produced it.
   , templates :: [Template event]
   -- ^ The templates.
-  , genprops :: Set (Property event)
-  -- ^ All properties that have been generated from a template.
   }
+
+-- | The state of an individual property
+data PropState event
+  = Computing (Property event)
+  -- ^ The final result is not yet available, we're still computing on
+  -- the property.
+  | Finished (Modal Bool) Int
+  -- ^ The final result and a count of how many trace items were
+  -- triggered before this happened (equal to the index + 1 in the
+  -- final trace)
+  deriving (Eq, Ord, Read, Show, Functor)
+
+instance NFData event => NFData (PropState event) where
+  rnf (Computing prop) = rnf prop
+  rnf (Finished b i) = rnf (b, i)
 
 -- | Initial state for a monitor.
 initialMonitoringState :: MonitoringState event
@@ -445,9 +467,8 @@ initialMonitoringState = MonitoringState
   { events = S.empty
   , allseen = S.empty
   , evtrace = []
-  , properties = []
+  , properties = M.empty
   , templates = []
-  , genprops = S.empty
   }
 
 -- | Instantiate all the templates, and register the new properties.
@@ -461,18 +482,14 @@ instantiateTemplate :: Ord event
   => MonitoringState event
   -> Template event
   -> MonitoringState event
-instantiateTemplate state template
-  | S.null newprops = state
-  | otherwise = state
-    { genprops   = genprops state `S.union` S.map thd newprops
-    , properties = properties state ++ S.toList newprops
-    }
+instantiateTemplate state template = state
+  { properties = properties state `M.union` M.fromList newprops }
 
   where
-    newprops = S.filter ((`S.notMember` genprops state) . thd) allprops
-    allprops = template (allseen state)
-
-    thd (_, _, p) = p
+    newprops = [ (prop, (msg, sev, Computing prop))
+               | (msg, sev, prop) <- S.toList (template $ allseen state)
+               , prop `M.notMember` properties state
+               ]
 
 -- | Add a template to the state and instantiate it.
 addstantiateTemplate :: Ord event
@@ -482,25 +499,41 @@ addstantiateTemplate :: Ord event
 addstantiateTemplate template state = instantiateTemplate state' template where
   state' = state { templates = template : templates state }
 
--- | Check the properties, returning a new collection of properties
--- and an action to log the failures.
-checkProperties :: (Applicative f, Eq event)
+-- | Add a new property, if it does not already exist.
+addProp :: Ord event
+  => String
+  -> Severity
+  -> Property event
+  -> MonitoringState event
+  -> MonitoringState event
+addProp msg sev prop state
+  | prop `M.member` properties state = state
+  | otherwise = state { properties = M.insert prop
+                                              (msg, sev, Computing prop)
+                                              (properties state) }
+
+-- | Check the properties, returning the state with an updated
+-- property map and an action to log the failures.
+checkProperties :: (Applicative f, Ord event)
   => MonitoringState event
   -> (Severity -> String -> f ())
-  -> ([(String, Severity, Property event)], f ())
-checkProperties state logf = (newProps, logAct) where
-  newProps = lefts checked
-  logAct   = (sequenceA_ . catMaybes . rights) checked
+  -> (MonitoringState event, f ())
+checkProperties state logf = (state { properties = newProps }, logAct) where
+  (newProps, logAct) = (M.fromList *** sequenceA_) (unzip checked)
 
   -- Check all properties against the events
-  checked = map (checkP (events state)) (properties state)
+  checked = map (checkP (events state)) (M.toList $ properties state)
 
-  -- Check a single property against the events
-  --
-  -- For now, just drop properties which evaluate to a \"possibly\"
-  -- result.
-  checkP es (name, severity, prop) = case evaluate prop es of
-    Right (Certainly True)  -> Right Nothing
-    Right (Certainly False) -> Right (Just (logf severity name))
-    Right (Possibly _) -> Right Nothing
-    Left  prop' -> Left (name, severity, prop')
+  -- Check a single property against the events.
+  checkP es (k, (msg, sev, Computing prop)) = case evaluate prop es of
+    Right b    -> ((k, (msg, sev, Finished b tracePos)), action b sev msg)
+    Left prop' -> ((k, (msg, sev, Computing prop')),     pure ())
+  checkP es keyAndProp = (keyAndProp, pure ())
+
+  -- Get the action for a property. Only logs if the action evaluates
+  -- to @Certainly False@.
+  action (Certainly False) sev msg = logf sev msg
+  action _ _ _ = pure ()
+
+  -- The current trace position.
+  tracePos = length (evtrace state)
