@@ -40,6 +40,8 @@ module Control.Monad.Monitor
 
   -- * Utilities
   , MonitoringState(..)
+  , TraceItem(..)
+  , PropState(..)
   , initialMonitoringState
   , instantiateTemplates
   , instantiateTemplate
@@ -50,19 +52,17 @@ module Control.Monad.Monitor
 import Control.Arrow ((***))
 import Control.Concurrent.STM.CTVar (readCTVar, modifyCTVar, writeCTVar)
 import Control.DeepSeq (NFData(..))
-import Control.Monad (join)
+import Control.Monad (join, void)
 import Control.Monad.Catch (MonadThrow(..), MonadCatch(..), MonadMask(..))
 import Control.Monad.Conc.Class (MonadConc(..))
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.State.Strict (StateT, evalStateT, get, modify, put)
 import Control.Monad.STM.Class (MonadSTM(..))
 import Control.Monad.Trans (MonadTrans(..))
-import Data.Either (lefts, rights)
 import Data.Foldable (sequenceA_)
 import Data.List (foldl')
 import Data.Map (Map)
 import qualified Data.Map as M
-import Data.Maybe (catMaybes)
 import Data.Set (Set)
 import qualified Data.Set as S
 import Data.Typeable
@@ -89,7 +89,10 @@ runMonitoringT :: (Monad m, Ord event)
   -> MonitoringT event m a
   -> m a
 runMonitoringT logf (MonitoringT ma) =
-  evalStateT (ma logf) initialMonitoringState
+  flip evalStateT initialMonitoringState $ do
+    a <- ma logf
+    void (stateCheckProps True logf)
+    pure a
 
 -- | Run a 'MonitoringT' action which prints messages to stdout.
 runStdoutMonitoringT :: (MonadIO m, Ord event) => MonitoringT event m a -> m a
@@ -154,30 +157,29 @@ instance (Monad m, Ord event) => MonadMonitor event (MonitoringT event m) where
     put $ if any (`S.notMember` allseen s) es
           then instantiateTemplates s'
           else s'
-    stateCheckProps logf
+    stateCheckProps False logf
 
   stopEvents es = join . MonitoringT $ \logf -> do
     modify (\s -> s { events  = S.difference (events s) (S.fromList es)
                     , evtrace = Stop es : evtrace s
                     }
            )
-    stateCheckProps logf
+    stateCheckProps False logf
 
-  addPropertyWithSeverity severity name checker = join . MonitoringT $
-    \logf -> do
-      modify (addProp name severity checker)
-      stateCheckProps logf
+  addPropertyWithSeverity severity name checker = MonitoringT . const $
+    modify (addProp name severity checker)
 
   addTemplate template = MonitoringT $ \_ ->
     modify (addstantiateTemplate template)
 
 -- | Check properties and do logging.
 stateCheckProps :: (Monad m, Ord event)
-  => (Severity -> String -> MonitoringT event m ())
+  => Bool
+  -> (Severity -> String -> MonitoringT event m ())
   -> StateT (MonitoringState event) m (MonitoringT event m ())
-stateCheckProps logf = do
+stateCheckProps isEnd logf = do
   state <- get
-  let (state', loga) = checkProperties state logf
+  let (state', loga) = checkProperties isEnd state logf
   put state'
   pure loga
 
@@ -200,7 +202,9 @@ runConcurrentMonitoringT :: (MonadConc m, Ord event)
   -> m a
 runConcurrentMonitoringT logf (ConcurrentMonitoringT ma) = do
   var <- atomically (newCTVar initialMonitoringState)
-  ma var logf
+  a <- ma var logf
+  void (atomically $ stmCheckProps True var logf)
+  pure a
 
 -- | The type of detected property violations, logged in the
 -- computation trace.
@@ -349,7 +353,7 @@ instance (MonadConc m, Ord event) => MonadMonitor event (ConcurrentMonitoringT e
       writeCTVar var $ if any (`S.notMember` allseen s) es
                        then instantiateTemplates s'
                        else s'
-      stmCheckProps var logf
+      stmCheckProps False var logf
 
   stopEvents es = join . ConcurrentMonitoringT $
     \var logf -> atomically $ do
@@ -357,24 +361,24 @@ instance (MonadConc m, Ord event) => MonadMonitor event (ConcurrentMonitoringT e
                                , evtrace = Stop es : evtrace s
                                }
                       )
-      stmCheckProps var logf
+      stmCheckProps False var logf
 
-  addPropertyWithSeverity severity name checker = join . ConcurrentMonitoringT $
-    \var logf -> atomically $ do
+  addPropertyWithSeverity severity name checker = ConcurrentMonitoringT $
+    \var _ -> atomically $
       modifyCTVar var (addProp name severity checker)
-      stmCheckProps var logf
 
   addTemplate template = ConcurrentMonitoringT $ \var _ -> atomically $
     modifyCTVar var (addstantiateTemplate template)
 
 -- | Check properties and do logging.
 stmCheckProps :: (MonadConc m, Ord event)
-  => CTVar (STMLike m) (MonitoringState event)
+  => Bool
+  -> CTVar (STMLike m) (MonitoringState event)
   -> (Severity -> String -> ConcurrentMonitoringT event m ())
   -> STMLike m (ConcurrentMonitoringT event m ())
-stmCheckProps var logf = do
+stmCheckProps isEnd var logf = do
   state <- readCTVar var
-  let (state', loga) = checkProperties state logf
+  let (state', loga) = checkProperties isEnd state logf
   writeCTVar var state'
   pure loga
 
@@ -426,6 +430,11 @@ instance Monad f => MonadMonitor Void (NoMonitoringT f) where
 
 -- | What was done with some events. Used to generate the trace.
 data TraceItem event = Start [event] | Stop [event]
+  deriving (Eq, Ord, Read, Show, Functor)
+
+instance NFData event => NFData (TraceItem event) where
+  rnf (Start es) = rnf es
+  rnf (Stop  es) = rnf es
 
 -- | State for the 'MonitoringT' and 'ConcurrentMonitoringT'
 -- transformers.
@@ -508,27 +517,35 @@ addProp :: Ord event
   -> MonitoringState event
 addProp msg sev prop state
   | prop `M.member` properties state = state
-  | otherwise = state { properties = M.insert prop
-                                              (msg, sev, Computing prop)
-                                              (properties state) }
+  | otherwise = case evaluate prop (events state) of
+      -- If the property immediately finishes computing, drop it. This
+      -- is probably bad and probably the log function should be
+      -- called here if it's falsified.
+      Right _ -> state
+      Left prop' -> state { properties = M.insert
+                                           prop
+                                           (msg, sev, Computing prop')
+                                           (properties state)
+                          }
 
 -- | Check the properties, returning the state with an updated
 -- property map and an action to log the failures.
 checkProperties :: (Applicative f, Ord event)
-  => MonitoringState event
+  => Bool
+  -> MonitoringState event
   -> (Severity -> String -> f ())
   -> (MonitoringState event, f ())
-checkProperties state logf = (state { properties = newProps }, logAct) where
+checkProperties isEnd state logf = (state { properties = newProps }, logAct) where
   (newProps, logAct) = (M.fromList *** sequenceA_) (unzip checked)
 
   -- Check all properties against the events
   checked = map (checkP (events state)) (M.toList $ properties state)
 
   -- Check a single property against the events.
-  checkP es (k, (msg, sev, Computing prop)) = case evaluate prop es of
+  checkP es (k, (msg, sev, Computing prop)) = case eval prop es of
     Right b    -> ((k, (msg, sev, Finished b tracePos)), action b sev msg)
     Left prop' -> ((k, (msg, sev, Computing prop')),     pure ())
-  checkP es keyAndProp = (keyAndProp, pure ())
+  checkP _ keyAndProp = (keyAndProp, pure ())
 
   -- Get the action for a property. Only logs if the action evaluates
   -- to @Certainly False@.
@@ -537,3 +554,6 @@ checkProperties state logf = (state { properties = newProps }, logAct) where
 
   -- The current trace position.
   tracePos = length (evtrace state)
+
+  -- The evaluation function
+  eval = if isEnd then evaluateEnd else evaluate
