@@ -59,6 +59,7 @@ module Control.Monad.Monitor.Property
   -- * Evaluation
   , Modal(..)
   , evaluate
+  , evaluateEnd
 
   -- * Utilities
   , normalise
@@ -282,7 +283,31 @@ evaluate :: (Eq event, Foldable f)
   => Property event
   -> f event
   -> Either (Property event) (Modal Bool)
-evaluate prop events = evaluateSP (normalise prop) where
+evaluate = evaluateIsEndFail False
+
+-- | Variant of 'evaluate' which has the knowledge that the
+-- computation is over. This means that all @Until@ predicates with an
+-- unproven right-hand side are actually false; and all @Release@
+-- predicates with a proven left-hand side are actually true (unless
+-- the right-hand side is now false).
+--
+-- This does not mean that the entire expression will evaluate to a
+-- boolean, however. It might result in a formula which could neither
+-- be proven nor disproven in this execution. A reasonable
+-- interpretation of this depends on context, but \"true\" is probably
+-- suitable for most cases.
+evaluateEnd :: (Eq event, Foldable f)
+  => Property event
+  -> f event
+  -> Either (Property event) (Modal Bool)
+evaluateEnd = evaluateIsEndFail True
+
+evaluateIsEndFail :: (Eq event, Foldable f)
+  => Bool
+  -> Property event
+  -> f event
+  -> Either (Property event) (Modal Bool)
+evaluateIsEndFail isEnd prop events = evaluateSP (normalise prop) where
   evaluateSP (SNot phi) = either (Left . SNot) (Right . mnot) (evaluateSP phi)
   evaluateSP (SAnd phi psi) =
     let elim = modalBool
@@ -332,23 +357,31 @@ evaluate prop events = evaluateSP (normalise prop) where
     (Right True, _)  -> Right True
     (Right False, o) -> o
     (Left phi', Left psi') -> Left (POr phi' psi')
-  evaluatePP u@(Until phi psi) = case evaluatePP psi of
-    Right True -> Right True
-    Right False -> case evaluatePP phi of
-      Right True  -> Left u
-      Right False -> Right False
-      Left phi' -> Left (PAnd phi' u)
-    Left psi' -> case evaluatePP phi of
-      Right True  -> Left (POr psi' u)
-      Right False -> Left psi'
-      Left phi' -> Left (POr psi' (PAnd phi' u))
+  evaluatePP u@(Until phi psi)
+    | isEnd = case evaluatePP psi of
+      Right True -> Right True
+      _ -> Right False
+    | otherwise = case evaluatePP psi of
+      Right True -> Right True
+      Right False -> case evaluatePP phi of
+        Right True  -> Left u
+        Right False -> Right False
+        Left phi' -> Left (PAnd phi' u)
+      Left psi' -> case evaluatePP phi of
+        Right True  -> Left (POr psi' u)
+        Right False -> Left psi'
+        Left phi' -> Left (POr psi' (PAnd phi' u))
   evaluatePP r@(Release phi psi) = case evaluatePP psi of
     Right True -> case evaluatePP phi of
       Right True  -> Right True
       Right False -> Left r
-      Left phi' -> Left (POr phi' (Until phi psi))
+      Left phi'
+        | isEnd && evaluatePP phi == Right True -> Right True
+        | otherwise -> Left (POr phi' (Until phi psi))
     Right False -> Right False
     Left psi' -> case evaluatePP phi of
-      Right True  -> Left psi'
+      Right True
+        | isEnd -> Right True
+        | otherwise -> Left psi'
       Right False -> Left (PAnd psi' r)
       Left phi' -> Left (PAnd psi' (POr phi' (Until phi psi)))
