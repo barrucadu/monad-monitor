@@ -522,13 +522,13 @@ addProp msg sev prop state
       -- If the property immediately finishes computing, drop it. This
       -- is probably bad and probably the log function should be
       -- called here if it's falsified.
-      Right _ -> state { evtrace = Left (msg, sev, prop) : evtrace state }
-      Left prop' -> state { properties = M.insert
-                                           prop
-                                           (msg, sev, Computing prop')
-                                           (properties state)
-                          , evtrace = Left (msg, sev, prop) : evtrace state
-                          }
+      Just (Left prop') -> state
+        { properties = M.insert prop
+                                (msg, sev, Computing prop')
+                                (properties state)
+        , evtrace = Left (msg, sev, prop) : evtrace state
+        }
+      _ -> state { evtrace = Left (msg, sev, prop) : evtrace state }
 
 -- | Check the properties, returning the state with an updated
 -- property map and an action to log the failures.
@@ -541,13 +541,14 @@ checkProperties isEnd state logf = (state { properties = newProps }, logAct) whe
   (newProps, logAct) = (M.fromList *** sequenceA_) (unzip checked)
 
   -- Check all properties against the events
-  checked = map (checkP (events state)) (M.toList $ properties state)
+  checked = [((k, p), a) | ((k, Just p), a) <- map (checkP (events state)) (M.toList $ properties state)]
 
   -- Check a single property against the events.
   checkP es (k, (msg, sev, Computing prop)) = case eval prop es of
-    Right b    -> ((k, (msg, sev, Finished b tracePos)), action b sev msg)
-    Left prop' -> ((k, (msg, sev, Computing prop')),     pure ())
-  checkP _ keyAndProp = (keyAndProp, pure ())
+    Just (Right b)    -> ((k, Just (msg, sev, Finished b tracePos)), action b sev msg)
+    Just (Left prop') -> ((k, Just (msg, sev, Computing prop')),     pure ())
+    Nothing -> ((k, Nothing), pure ())
+  checkP _ (k, p) = ((k, Just p), pure ())
 
   -- Get the action for a property. Only logs if the action evaluates
   -- to @Certainly False@.

@@ -1,7 +1,7 @@
 {-# LANGUAGE DeriveFunctor #-}
 
--- | An (almost) implementation of CTL* properties, for monitoring
--- program executions.
+-- | An implementation of CTL* properties, for monitoring program
+-- executions.
 --
 -- CTL* is a logic for talking about time, both branching and linear,
 -- in addition to the normal true, false, and, or, not operations it
@@ -32,6 +32,11 @@
 -- - @φ R ψ@ (or 'Release') expresses that the formula @ψ@ must hold
 --   up to and including the point where @φ@ does, but @φ@ does not
 --   necessarily ever need to hold.
+--
+-- - And 'State' @φ@, which expresses that the state formula @φ@ must
+--   hold from this point onwards. This mutual recursion between state
+--   and path formulae is what makes CTL* strictly more powerful than,
+--   and a superset of, both LTL and CTL.
 --
 -- There are some derived path operations provided as functions:
 --
@@ -74,6 +79,7 @@ module Control.Monad.Monitor.Property
 
 import Control.DeepSeq (NFData(..))
 import Data.List (foldl')
+import Data.Maybe (fromJust)
 import Data.Semigroup(Semigroup(..))
 import Data.Tree (Tree(..))
 
@@ -138,6 +144,11 @@ data PathProp event
   -- ^ @Release phi psi@ expresses that the formula @psi@ must hold up
   -- to and including the point where @phi@ does, but @phi@ does not
   -- necessarily ever need to hold.
+  | State (StateProp event)
+  -- ^ @State phi@ expresses that the state formula @phi@ must hold
+  -- from this point onwards. This mutual recursion between state and
+  -- path formulae is what makes CTL* strictly more powerful than, and
+  -- a superset of, both LTL and CTL.
   deriving (Eq, Ord, Read, Show, Functor)
 
 instance NFData event => NFData (PathProp event) where
@@ -146,6 +157,7 @@ instance NFData event => NFData (PathProp event) where
   rnf (PAnd p1 p2) = rnf (p1, p2)
   rnf (POr  p1 p2) = rnf (p1, p2)
   rnf (Event e) = rnf e
+  rnf (State p) = rnf p
   rnf (Next  p) = rnf p
   rnf (PNot  p) = rnf p
   rnf x = x `seq` ()
@@ -179,12 +191,14 @@ normalise = normaliseSP where
   normalisePP (Until   phi psi) = Until   (normalisePP phi) (normalisePP psi)
   normalisePP (PAnd phi psi) = PAnd (normalisePP phi) (normalisePP psi)
   normalisePP (POr  phi psi) = POr  (normalisePP phi) (normalisePP psi)
+  normalisePP (State phi) = State (normaliseSP phi)
   normalisePP (PNot (Next  phi)) = Next  (normalisePP (PNot phi))
   normalisePP (PNot (PNot  phi)) = normalisePP phi
   normalisePP (PNot (Release phi psi)) = Until   (normalisePP (PNot phi)) (normalisePP (PNot psi))
   normalisePP (PNot (Until   phi psi)) = Release (normalisePP (PNot phi)) (normalisePP (PNot psi))
   normalisePP (PNot (PAnd phi psi)) = POr  (normalisePP (PNot phi)) (normalisePP (PNot psi))
   normalisePP (PNot (POr  phi psi)) = PAnd (normalisePP (PNot phi)) (normalisePP (PNot psi))
+  normalisePP (PNot (State phi)) = State (normaliseSP (SNot phi))
   normalisePP (PNot TTrue) = FFalse
   normalisePP (PNot FFalse) = TTrue
   normalisePP x = x
@@ -282,10 +296,20 @@ combine f (Possibly  b1) (Possibly  b2) = Possibly  (f b1 b2)
 --
 -- If @Left@, the new formula should replace the current one and be
 -- checked against the subsequent execution.
+--
+-- The @Modal Bool@ because it is not possible in general to prove or
+-- disprove a given CTL* property by checking a single
+-- execution. Furthermore, this implementation makes a good attempt,
+-- but gives up if it encounters nested state quantifiers (@All@ and
+-- @Exists@) which evaluate to a @Possibly@ value, hence the @Maybe@.
+--
+-- If you want to be able to check full CTL* properties, construct the
+-- computation tree of your program and use 'evaluateTree'. See
+-- "Test.DejaFu.Temporal".
 evaluate :: (Eq event, Foldable f)
   => Property event
   -> f event
-  -> Either (Property event) (Modal Bool)
+  -> Maybe (Either (Property event) (Modal Bool))
 evaluate = evaluateIsEndFail False
 
 -- | Variant of 'evaluate' which has the knowledge that the
@@ -302,46 +326,61 @@ evaluate = evaluateIsEndFail False
 evaluateEnd :: (Eq event, Foldable f)
   => Property event
   -> f event
-  -> Either (Property event) (Modal Bool)
+  -> Maybe (Either (Property event) (Modal Bool))
 evaluateEnd = evaluateIsEndFail True
 
 evaluateIsEndFail :: (Eq event, Foldable f)
   => Bool
   -> Property event
   -> f event
-  -> Either (Property event) (Modal Bool)
+  -> Maybe (Either (Property event) (Modal Bool))
 evaluateIsEndFail isEnd prop events = evaluateSP (normalise prop) where
-  evaluateSP (SNot phi) = either (Left . SNot) (Right . mnot) (evaluateSP phi)
+  evaluateSP (SNot phi) = either (Left . SNot) (Right . mnot) <$> evaluateSP phi
+
   evaluateSP (SAnd phi psi) =
     let elim = modalBool
                  Left
                  (const (Right (Certainly False)))
                  (Left . SAnd (All TTrue))
                  (Left . SAnd (Exists FFalse))
-    in case (evaluateSP phi, evaluateSP psi) of
-         (Right mb1, Right mb2) -> Right (mand mb1 mb2)
-         (Right mb1, Left psi') -> elim mb1 psi'
-         (Left phi', Right mb2) -> elim mb2 phi'
-         (Left phi', Left psi') -> Left (SAnd phi' psi')
+
+        sand (Right mb1)  (Right mb2)  = Right (mand mb1 mb2)
+        sand (Right mb1)  (Left  psi') = elim mb1 psi'
+        sand (Left  phi') (Right mb2)  = elim mb2 phi'
+        sand (Left  phi') (Left  psi') = Left (SAnd phi' psi')
+    in sand <$> evaluateSP phi <*> evaluateSP psi
+
   evaluateSP (SOr phi psi) =
     let elim = modalBool
                  (const (Right (Certainly True)))
                  Left
                  (Left . SOr (All TTrue))
                  (Left . SOr (Exists FFalse))
-    in case (evaluateSP phi, evaluateSP psi) of
-         (Right mb1, Right mb2) -> Right (mor mb1 mb2)
-         (Right mb1, Left psi') -> elim mb1 psi'
-         (Left phi', Right mb2) -> elim mb2 phi'
-         (Left phi', Left psi') -> Left (SOr phi' psi')
-  evaluateSP (All phi) = case evaluatePPHere isEnd events phi of
-    Right True  -> Right (Possibly True)
-    Right False -> Right (Certainly False)
-    Left phi' -> Left (All phi')
-  evaluateSP (Exists phi) = case evaluatePPHere isEnd events phi of
-    Right True  -> Right (Certainly True)
-    Right False -> Right (Possibly False)
-    Left phi' -> Left (Exists phi')
+
+        sor (Right mb1)  (Right mb2)  = Right (mor mb1 mb2)
+        sor (Right mb1)  (Left  psi') = elim mb1 psi'
+        sor (Left  phi') (Right mb2)  = elim mb2 phi'
+        sor (Left  phi') (Left  psi') = Left (SOr phi' psi')
+    in sor <$> evaluateSP phi <*> evaluateSP psi
+
+  evaluateSP (All phi) =
+    let sall (Right True)  = Right (Possibly True)
+        sall (Right False) = Right (Certainly False)
+        sall (Left  phi')  = Left (All phi')
+    in sall <$> evaluatePP phi
+
+  evaluateSP (Exists phi) =
+    let sexists (Right True)  = Right (Certainly True)
+        sexists (Right False) = Right (Possibly False)
+        sexists (Left  phi')  = Left (Exists phi')
+    in sexists <$> evaluatePP phi
+
+  evaluatePP = evaluatePPHere tryEvalSP isEnd events where
+    tryEvalSP phi = evaluateSP phi >>= \val -> case val of
+      Right (Certainly b) -> Just (Right b)
+      -- Give up on nested @Possibly@ values.
+      Right (Possibly _) -> Nothing
+      Left phi' -> Just (Left phi')
 
 -- | Evaluate a formula against a complete execution tree.
 --
@@ -358,7 +397,7 @@ evaluateTree :: (Eq event, Foldable f)
   -> Property event
   -> Tree a
   -> Maybe Bool
-evaluateTree estep initial prop = eitherToMaybe . eval initial (Right $ normalise prop) where
+evaluateTree estep initial prop0 = eitherToMaybe . eval initial (Right $ normalise prop0) where
   -- Either PathProp StateProp
   eval es prop (Node a children) =
     let events = estep es a
@@ -384,8 +423,8 @@ evaluateTree estep initial prop = eitherToMaybe . eval initial (Right $ normalis
   -- Evaluate a path formula against a tree.
   evaluatePP cs es phi =
     let isEnd = null cs
-        evaluated = evaluatePPHere isEnd es phi
-    in either (evalAll cs es . Left) Right evaluated
+        evaluated = evaluatePPHere (Just . evaluateSP cs es) isEnd es phi
+    in either (evalAll cs es . Left) Right $ fromJust evaluated
 
   -- Check a formula holds for every tree in a forest.
   evalAll cs es phi = foldl' go (Right True) cs where
@@ -410,56 +449,73 @@ evaluateTree estep initial prop = eitherToMaybe . eval initial (Right $ normalis
 -- | Evaluate a normalised path formula against a collection of
 -- events.
 evaluatePPHere :: (Eq event, Foldable f)
-  => Bool
+  => (StateProp event -> Maybe (Either (Property event) Bool))
+  -- ^ Function to handle nested state props.
+  -> Bool
+  -- ^ True if this is the end of the computation.
   -> f event
+  -- ^ The active events.
   -> PathProp event
-  -> Either (PathProp event) Bool
-evaluatePPHere isEnd events = eval where
-  eval TTrue = Right True
-  eval FFalse = Right False
-  eval (Event event) = Right (event `elem` events)
-  eval (Next phi) = Left phi
-  eval (PNot phi) = either (Left . PNot) (Right . not) (eval phi)
-  eval  (PAnd phi psi) = case (eval phi, eval psi) of
-    (o, Right True)  -> o
-    (_, Right False) -> Right False
-    (Right True, o)  -> o
-    (Right False, _) -> Right False
-    (Left phi', Left psi') -> Left (PAnd phi' psi')
-  eval (POr phi psi) = case (eval phi, eval psi) of
-    (_, Right True)  -> Right True
-    (o, Right False) -> o
-    (Right True, _)  -> Right True
-    (Right False, o) -> o
-    (Left phi', Left psi') -> Left (POr phi' psi')
-  eval u@(Until phi psi)
-    | isEnd = case eval psi of
-      Right True -> Right True
-      _ -> Right False
-    | otherwise = case eval psi of
-      Right True -> Right True
-      Right False -> case eval phi of
-        Right True  -> Left u
-        Right False -> Right False
-        Left phi' -> Left (PAnd phi' u)
-      Left psi' -> case eval phi of
-        Right True  -> Left (POr psi' u)
-        Right False -> Left psi'
-        Left phi' -> Left (POr psi' (PAnd phi' u))
-  eval r@(Release phi psi) = case eval psi of
-    Right True -> case eval phi of
-      Right True  -> Right True
-      Right False -> Left r
-      Left phi'
-        | isEnd && eval phi == Right True -> Right True
-        | otherwise -> Left (POr phi' (Until phi psi))
-    Right False -> Right False
-    Left psi' -> case eval phi of
-      Right True
-        | isEnd -> Right True
-        | otherwise -> Left psi'
-      Right False -> Left (PAnd psi' r)
-      Left phi' -> Left (PAnd psi' (POr phi' (Until phi psi)))
+  -- ^ The path formula to check.
+  -> Maybe (Either (PathProp event) Bool)
+evaluatePPHere evalSP isEnd events = eval where
+  eval TTrue = Just $ Right True
+
+  eval FFalse = Just $ Right False
+
+  eval (Event event) = Just $ Right (event `elem` events)
+
+  eval (State phi) = either (Left . State) Right <$> evalSP phi
+
+  eval (Next phi) = Just $ Left phi
+
+  eval (PNot phi) = either (Left . PNot) (Right . not) <$> eval phi
+
+  eval (PAnd phi psi) =
+    let pand o (Right True)  = o
+        pand _ (Right False) = Right False
+        pand (Right True) o  = o
+        pand (Right False) _ = Right False
+        pand (Left phi') (Left psi') = Left (PAnd phi' psi')
+    in pand <$> eval phi <*> eval psi
+
+  eval (POr phi psi) =
+    let por _ (Right True)  = Right True
+        por o (Right False) = o
+        por (Right True) _  = Right True
+        por (Right False) o = o
+        por (Left phi') (Left psi') = Left (POr phi' psi')
+    in por <$> eval phi <*> eval psi
+
+  eval u@(Until phi psi) =
+    let puntilE (Right True) _ = Right True
+        puntilE _ _ = Right False
+
+        puntilC _ (Right True) = Right True
+        puntilC (Right True)  (Right False) = Left u
+        puntilC (Right False) (Right False) = Right False
+        puntilC (Left  phi')  (Right False) = Left (PAnd phi' u)
+        puntilC (Right True)  (Left psi') = Left (POr psi' u)
+        puntilC (Right False) (Left psi') = Left psi'
+        puntilC (Left phi')   (Left psi') = Left (POr psi' (PAnd phi' u))
+    in (if isEnd then puntilE else puntilC) <$> eval phi <*> eval psi
+
+  -- release phi psi == psi must be true up until phi is; phi is not
+  -- required to ever be true.
+
+  eval r@(Release phi psi) =
+    let prelease _ (Right False) = Right False
+        prelease (Right True) (Right True) = Right True
+        prelease (Right True) (Left psi')
+          | isEnd     = Right True
+          | otherwise = Left psi'
+        prelease (Right False) (Right True) = Left r
+        prelease (Right False) (Left  psi') = Left (PAnd psi' r)
+        prelease (Left phi') (Right True)
+          | isEnd = Right True
+          | otherwise = Left (POr phi' (Until phi psi))
+        prelease (Left phi') (Left psi') = Left (PAnd psi' (POr phi' (Until phi psi)))
+    in prelease <$> eval phi <*> eval psi
 
 -- | Forget @Left@ values.
 eitherToMaybe :: Either a b -> Maybe b
