@@ -23,7 +23,7 @@ import Control.DeepSeq (NFData(..))
 import Control.Monad.Conc.Class (MonadConc, atomically)
 import Control.Monad.Monitor
 import Control.Monad.Monitor.Property (evaluateTree)
-import Control.Monad.STM.Class (readCTVar)
+import Control.Monad.STM.Class (readTVar)
 import Data.Function (on)
 import Data.List (groupBy, sortBy)
 import Data.Map (Map)
@@ -33,7 +33,7 @@ import Data.Ord (comparing)
 import qualified Data.Set as S
 import Data.Tree (Tree(..))
 import Test.DejaFu (defaultBounds, defaultMemType)
-import Test.DejaFu.Deterministic (ConcIO, ConcST, Failure, Trace)
+import Test.DejaFu.Deterministic (ConcIO, ConcST, Failure, Trace, ThreadId, ThreadAction, Lookahead)
 import Test.DejaFu.SCT (sctBound, sctBoundIO)
 
 import Unsafe.Coerce (unsafeCoerce)
@@ -95,7 +95,7 @@ comptreeOf ma = makeCTreeFrom $ sctBound'
     -- Nasty. I need to expose a @sctBound@ function that keeps the
     -- result in @ST t@, which should solve these composability
     -- problems: do everything in @ST t@ then @runST@ at the very end.
-    sctBound' :: ConcST t (MonitoringState event) -> [(Either Failure (MonitoringState event), Trace)]
+    sctBound' :: ConcST t (MonitoringState event) -> [(Either Failure (MonitoringState event), Trace ThreadId ThreadAction Lookahead)]
     sctBound' = unsafeCoerce $ sctBound defaultMemType defaultBounds
 
 -- | Variant of 'comptreeOf' for computations which do @IO@.
@@ -159,7 +159,7 @@ allOk = Falsified M.empty
 
 -- | Get the monitoring state
 getState :: MonadConc m => ConcurrentMonitoringT event m (MonitoringState event)
-getState = ConcurrentMonitoringT $ \var _ -> atomically (readCTVar var)
+getState = ConcurrentMonitoringT $ \var _ -> atomically (readTVar var)
 
 -- | Sort and remove duplicates from a list
 ordNub :: Ord a => [a] -> [a]

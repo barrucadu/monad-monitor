@@ -50,7 +50,7 @@ module Control.Monad.Monitor
   ) where
 
 import Control.Arrow ((***))
-import Control.Concurrent.STM.CTVar (readCTVar, modifyCTVar, writeCTVar)
+import Control.Concurrent.Classy.STM.TVar (readTVar, modifyTVar, writeTVar)
 import Control.DeepSeq (NFData(..))
 import Control.Monad (join, void)
 import Control.Monad.Catch (MonadThrow(..), MonadCatch(..), MonadMask(..))
@@ -188,7 +188,7 @@ stateCheckProps isEnd logf = do
 -- concurrency monads, based on a shared mutable set of active events.
 newtype ConcurrentMonitoringT event m a = ConcurrentMonitoringT
   { unConcurrentMonitoringT
-    :: CTVar (STMLike m) (MonitoringState event)
+    :: TVar (STM m) (MonitoringState event)
     -> (Severity -> String -> ConcurrentMonitoringT event m ())
     -> m a
   }
@@ -200,7 +200,7 @@ runConcurrentMonitoringT :: (MonadConc m, Ord event)
   -> ConcurrentMonitoringT event m a
   -> m a
 runConcurrentMonitoringT logf (ConcurrentMonitoringT ma) = do
-  var <- atomically (newCTVar initialMonitoringState)
+  var <- atomically (newTVar initialMonitoringState)
   a <- ma var logf
   void (atomically $ stmCheckProps True var logf)
   pure a
@@ -283,8 +283,8 @@ instance (MonadConc m, Ord event) => MonadMask (ConcurrentMonitoringT event m) w
     where q u (ConcurrentMonitoringT b) = ConcurrentMonitoringT (\var logf -> u $ b var logf)
 
 instance (MonadConc m, Ord event) => MonadConc (ConcurrentMonitoringT event m) where
-  type STMLike  (ConcurrentMonitoringT event m) = STMLike m
-  type CVar     (ConcurrentMonitoringT event m) = CVar m
+  type STM      (ConcurrentMonitoringT event m) = STM m
+  type MVar     (ConcurrentMonitoringT event m) = MVar m
   type CRef     (ConcurrentMonitoringT event m) = CRef m
   type Ticket   (ConcurrentMonitoringT event m) = Ticket m
   type ThreadId (ConcurrentMonitoringT event m) = ThreadId m
@@ -302,17 +302,17 @@ instance (MonadConc m, Ord event) => MonadConc (ConcurrentMonitoringT event m) w
   myThreadId         = lift myThreadId
   yield              = lift yield
   throwTo t          = lift . throwTo t
-  newEmptyCVar       = lift newEmptyCVar
-  newEmptyCVarN      = lift . newEmptyCVarN
-  readCVar           = lift . readCVar
-  putCVar v          = lift . putCVar v
-  tryPutCVar v       = lift . tryPutCVar v
-  takeCVar           = lift . takeCVar
-  tryTakeCVar        = lift . tryTakeCVar
+  newEmptyMVar       = lift newEmptyMVar
+  newEmptyMVarN      = lift . newEmptyMVarN
+  readMVar           = lift . readMVar
+  putMVar v          = lift . putMVar v
+  tryPutMVar v       = lift . tryPutMVar v
+  takeMVar           = lift . takeMVar
+  tryTakeMVar        = lift . tryTakeMVar
   newCRef            = lift . newCRef
   newCRefN n         = lift . newCRefN n
   readCRef           = lift . readCRef
-  modifyCRef r       = lift . modifyCRef r
+  atomicModifyCRef r = lift . atomicModifyCRef r
   writeCRef r        = lift . writeCRef r
   atomicWriteCRef r  = lift . atomicWriteCRef r
   readForCAS         = lift . readForCAS
@@ -344,19 +344,19 @@ concurrentt' f ma = ConcurrentMonitoringT $ \var logf ->
 instance (MonadConc m, Ord event) => MonadMonitor event (ConcurrentMonitoringT event m) where
   startEvents es = join . ConcurrentMonitoringT $
     \var logf -> atomically $ do
-      s <- readCTVar var
+      s <- readTVar var
       let s' = s { events  = S.union (events  s) (S.fromList es)
                  , allseen = S.union (allseen s) (S.fromList es)
                  , evtrace = Right (Start es) : evtrace s
                  }
-      writeCTVar var $ if any (`S.notMember` allseen s) es
+      writeTVar var $ if any (`S.notMember` allseen s) es
                        then instantiateTemplates s'
                        else s'
       stmCheckProps False var logf
 
   stopEvents es = join . ConcurrentMonitoringT $
     \var logf -> atomically $ do
-      modifyCTVar var (\s -> s { events  = S.difference (events s) (S.fromList es)
+      modifyTVar var (\s -> s { events  = S.difference (events s) (S.fromList es)
                                , evtrace = Right (Stop es) : evtrace s
                                }
                       )
@@ -364,21 +364,21 @@ instance (MonadConc m, Ord event) => MonadMonitor event (ConcurrentMonitoringT e
 
   addPropertyWithSeverity severity name checker = ConcurrentMonitoringT $
     \var _ -> atomically $
-      modifyCTVar var (addProp name severity checker)
+      modifyTVar var (addProp name severity checker)
 
   addTemplate template = ConcurrentMonitoringT $ \var _ -> atomically $
-    modifyCTVar var (addstantiateTemplate template)
+    modifyTVar var (addstantiateTemplate template)
 
 -- | Check properties and do logging.
 stmCheckProps :: (MonadConc m, Ord event)
   => Bool
-  -> CTVar (STMLike m) (MonitoringState event)
+  -> TVar (STM m) (MonitoringState event)
   -> (Severity -> String -> ConcurrentMonitoringT event m ())
-  -> STMLike m (ConcurrentMonitoringT event m ())
+  -> STM m (ConcurrentMonitoringT event m ())
 stmCheckProps isEnd var logf = do
-  state <- readCTVar var
+  state <- readTVar var
   let (state', loga) = checkProperties isEnd state logf
-  writeCTVar var state'
+  writeTVar var state'
   pure loga
 
 -------------------------------------------------------------------------------
