@@ -1,26 +1,36 @@
-{-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 -- | Systematic testing for temporal properties of concurrent
 -- programs.
 module Test.DejaFu.Temporal
-  ( Falsified(..)
+  ( -- * Testing
+    Falsified(..)
   , FailedProp(..)
   , testTemporal
   , testTemporalIO
+  -- * Computation trees
+  , Comptree
+  , comptreeOf
+  , comptreeOfIO
+  -- * Utilities
+  , makeTreeFrom
   ) where
 
 import Control.DeepSeq (NFData(..))
 import Control.Monad.Conc.Class (MonadConc, atomically)
 import Control.Monad.Monitor
-import Control.Monad.Monitor.Property (Modal(..))
+import Control.Monad.Monitor.Property (evaluateTree)
 import Control.Monad.STM.Class (readCTVar)
-import Data.List (partition)
+import Data.Function (on)
+import Data.List (groupBy, sortBy)
 import Data.Map (Map)
 import qualified Data.Map as M
 import Data.Maybe (mapMaybe)
+import Data.Ord (comparing)
 import qualified Data.Set as S
+import Data.Tree (Tree(..))
 import Test.DejaFu (defaultBounds, defaultMemType)
 import Test.DejaFu.Deterministic (ConcIO, ConcST, Failure, Trace)
 import Test.DejaFu.SCT (sctBound, sctBoundIO)
@@ -28,46 +38,26 @@ import Test.DejaFu.SCT (sctBound, sctBoundIO)
 import Unsafe.Coerce (unsafeCoerce)
 
 newtype Falsified event = Falsified (Map (Property event) (FailedProp event))
-  deriving (Eq, Ord, Read, Show)
-
-instance NFData event => NFData (Falsified event) where
-  rnf (Falsified fs) = rnf fs
+  deriving (Eq, Read, Show, NFData)
 
 data FailedProp event = FailedProp
   { propMsg :: String
   , propSev :: Severity
-  , failingTraces :: [([TraceItem event], Int)]
-  -- ^ The traces leading to this failure, with the index of the
-  -- failing start/stop action.
+  , failingTree :: Comptree event
   }
-  deriving (Eq, Ord, Read, Show, Functor)
+  deriving (Eq, Read, Show)
 
 instance NFData event => NFData (FailedProp event) where
-  rnf fp = rnf (propMsg fp, propSev fp, failingTraces fp)
+  rnf fp = rnf (propMsg fp, propSev fp, failingTree fp)
 
 -- | Systematically test the temporal properties of a program.
 --
--- The two modal results, @Possibly True@ and @Possibly False@ are
--- handled specially: if every result for a property is @Possibly
--- False@, the overall result is @False@; and similarly for @Possibly
--- True@. The same property can never evaluate to @Possibly True@ and
--- @Possibly False@ in different executions, as @Possibly True@ is
--- only introduced for @All@ and @Possibly False@ for @Exists@.
---
 -- Properties which could not be proven true or false are discarded.
-testTemporal :: forall event a. Ord event
+testTemporal :: Ord event
   => (forall t. ConcurrentMonitoringT event (ConcST t) a)
   -- ^ The computation to test.
   -> Falsified event
-testTemporal ma = processResults $ sctBound'
-  (runConcurrentMonitoringT (\_ _ -> pure ()) $ ma >> getState)
-
-  where
-    -- Nasty. I need to expose a @sctBound@ function that keeps the
-    -- result in @ST t@, which should solve these composability
-    -- problems: do everything in @ST t@ then @runST@ at the very end.
-    sctBound' :: ConcST t (MonitoringState event) -> [(Either Failure (MonitoringState event), Trace)]
-    sctBound' = unsafeCoerce $ sctBound defaultMemType defaultBounds
+testTemporal ma = checkTreeProps $ comptreeOf ma
 
 -- | Variant of 'testTemporal' for computations which do @IO@.
 --
@@ -78,57 +68,86 @@ testTemporal ma = processResults $ sctBound'
 testTemporalIO :: Ord event
   => ConcurrentMonitoringT event ConcIO a
   -> IO (Falsified event)
-testTemporalIO ma = processResults <$>
+testTemporalIO ma = checkTreeProps <$> comptreeOfIO ma
+
+-------------------------------------------------------------------------------
+
+-- | A tree representing all possible executions of a computation.
+--
+-- Each node in the tree contains: a new property that was registered;
+-- a collection of events that were started; or a collection of events
+-- that were stopped.
+type Comptree event = Tree (Either (String, Severity, Property event) (TraceItem event))
+
+-- | Produce the tree of a computation.
+comptreeOf :: forall event a. Ord event
+  => (forall t. ConcurrentMonitoringT event (ConcST t) a)
+  -- ^ The computation to run.
+  -> Comptree event
+comptreeOf ma = makeCTreeFrom $ sctBound'
+  (runConcurrentMonitoringT (\_ _ -> pure ()) $ ma >> getState)
+
+  where
+    -- Nasty. I need to expose a @sctBound@ function that keeps the
+    -- result in @ST t@, which should solve these composability
+    -- problems: do everything in @ST t@ then @runST@ at the very end.
+    sctBound' :: ConcST t (MonitoringState event) -> [(Either Failure (MonitoringState event), Trace)]
+    sctBound' = unsafeCoerce $ sctBound defaultMemType defaultBounds
+
+-- | Variant of 'comptreeOf' for computations which do @IO@.
+comptreeOfIO :: Ord event
+  => ConcurrentMonitoringT event ConcIO a
+  -> IO (Comptree event)
+comptreeOfIO ma = makeCTreeFrom <$>
   sctBoundIO defaultMemType defaultBounds
   (runConcurrentMonitoringT (\_ _ -> pure ()) $ ma >> getState)
 
 -------------------------------------------------------------------------------
 
--- | Turn the results of executing under dejafu into a @Falsified@.
-processResults :: Ord event
-  => [(Either f (MonitoringState event), t)]
-  -> Falsified event
-processResults results = Falsified $ M.fromList
-  [ (prop, FailedProp msg sev failures)
-  | (prop, (msg, sev, _)) <- concatMap (M.toList . properties) allStates
-  , let failures = ordNub (collapse $ allResults prop)
-  , not (null failures)
-  ]
+-- | Wrapper around 'makeTreeFrom' to deal with the dejafu cruft.
+--
+-- Discards executions that end in failure.
+makeCTreeFrom :: Ord event
+  => [(Either failure (MonitoringState event), trace)]
+  -> Comptree event
+makeCTreeFrom traces = makeTreeFrom evtraces where
+  evtraces = [ reverse (evtrace state) | (Right state, _) <- traces ]
 
-  where
-    -- All states
-    allStates = mapMaybe (either (const Nothing) Just . fst) results
+-- | Construct a tree from a list of paths from the root to a leaf.
+--
+-- This assumes that (1) every path has at least one initial element
+-- in common; and that (2) no path is a prefix of another.
+makeTreeFrom :: Ord a => [[a]] -> Tree a
+makeTreeFrom [] = error "makeTreeFrom: empty path list."
+makeTreeFrom ts = go1 (ordNub $ map tail ts) (head $ head ts) where
+  -- Construct a tree node given the paths and the label.
+  go1 paths label =
+    Node label . mapMaybe go2 . groupByHead . filter (not . null) $ paths
 
-    -- All results, + the trace, of a property.
-    allResults prop = flip mapMaybe allStates $
-      \state -> case M.lookup prop (properties state) of
-        Just (_, _, res) -> Just (res, reverse $ evtrace state)
-        _ -> Nothing
+  -- Construct a child given a path
+  go2 [] = Nothing
+  go2 as = Just $ makeTreeFrom as
 
-    -- Collapse all @Possibly@ results into a @Certainly@ (or throw
-    -- away due to not enough information).
-    collapse rs = case partition (isComputing . fst) rs of
-      (computing, done) -> case partition (isCertain . fst) done of
-        -- If there are some results still computing, we don't have
-        -- enough information to certainly say what the \"possibly\"
-        -- case should be.
-        (certain, possible)
-          | null computing -> pFails possible ++ cFails certain
-          | otherwise -> cFails certain
+-- | Check properties over a computation tree.
+checkTreeProps :: Ord event => Comptree event -> Falsified event
+checkTreeProps ctree = Falsified failures where
+  -- The failing cases
+  failures = M.fromList
+    [ (prop, failure) | ((msg, sev, prop), es, subtree) <- propTrees
+    , evaluateTree step es prop subtree == Just False
+    , let failure = FailedProp msg sev subtree
+    ]
 
-    -- Check if a result is still computing or not.
-    isComputing (Computing _)  = True
-    isComputing _ = False
+  -- All properties, the active events at that point, and the subtree
+  -- in which to check the property.
+  propTrees = go S.empty ctree where
+    go es n@(Node (Left prop) cs) = (prop, es, n) : concatMap (go es) cs
+    go es   (Node v cs) = concatMap (go $ step es v) cs
 
-    -- Check if a result is certain or not.
-    isCertain (Finished (Certainly _) _) = True
-    isCertain _ = False
-
-    -- Only keep certain failure cases.
-    cFails rs = [ (trace, i - 1) | (Finished (Certainly False) i, trace) <- rs ]
-
-    -- Only keep possible failure cases.
-    pFails rs = [ (trace, i - 1) | (Finished (Possibly False) i, trace) <- rs ]
+  -- Keep track of which events are active
+  step es (Right (Start evs)) = es `S.union`      S.fromList evs
+  step es (Right (Stop  evs)) = es `S.difference` S.fromList evs
+  step es (Left _) = es
 
 -------------------------------------------------------------------------------
 
@@ -139,3 +158,9 @@ getState = ConcurrentMonitoringT $ \var _ -> atomically (readCTVar var)
 -- | Sort and remove duplicates from a list
 ordNub :: Ord a => [a] -> [a]
 ordNub = S.toList . S.fromList
+
+-- | Group based on initial element
+--
+-- Assumes that none of the sublists are empty.
+groupByHead :: Ord a => [[a]] -> [[[a]]]
+groupByHead = groupBy ((==) `on` head) . sortBy (comparing head)

@@ -152,7 +152,7 @@ instance (Monad m, Ord event) => MonadMonitor event (MonitoringT event m) where
     s <- get
     let s' = s { events  = S.union (events  s) (S.fromList es)
                , allseen = S.union (allseen s) (S.fromList es)
-               , evtrace = Start es : evtrace s
+               , evtrace = Right (Start es) : evtrace s
                }
     put $ if any (`S.notMember` allseen s) es
           then instantiateTemplates s'
@@ -161,7 +161,7 @@ instance (Monad m, Ord event) => MonadMonitor event (MonitoringT event m) where
 
   stopEvents es = join . MonitoringT $ \logf -> do
     modify (\s -> s { events  = S.difference (events s) (S.fromList es)
-                    , evtrace = Stop es : evtrace s
+                    , evtrace = Right (Stop es) : evtrace s
                     }
            )
     stateCheckProps False logf
@@ -348,7 +348,7 @@ instance (MonadConc m, Ord event) => MonadMonitor event (ConcurrentMonitoringT e
       s <- readCTVar var
       let s' = s { events  = S.union (events  s) (S.fromList es)
                  , allseen = S.union (allseen s) (S.fromList es)
-                 , evtrace = Start es : evtrace s
+                 , evtrace = Right (Start es) : evtrace s
                  }
       writeCTVar var $ if any (`S.notMember` allseen s) es
                        then instantiateTemplates s'
@@ -358,7 +358,7 @@ instance (MonadConc m, Ord event) => MonadMonitor event (ConcurrentMonitoringT e
   stopEvents es = join . ConcurrentMonitoringT $
     \var logf -> atomically $ do
       modifyCTVar var (\s -> s { events  = S.difference (events s) (S.fromList es)
-                               , evtrace = Stop es : evtrace s
+                               , evtrace = Right (Stop es) : evtrace s
                                }
                       )
       stmCheckProps False var logf
@@ -443,8 +443,9 @@ data MonitoringState event = MonitoringState
   -- ^ The active events.
   , allseen :: Set event
   -- ^ All events that have been seen.
-  , evtrace :: [TraceItem event]
-  -- ^ The trace of events, built up in reverse order for efficiency.
+  , evtrace :: [Either (String, Severity, Property event) (TraceItem event)]
+  -- ^ The trace of events and property addition, built up in reverse
+  -- order for efficiency.
   , properties :: Map (Property event) (String, Severity, PropState event)
   -- ^ Properties are stored in a map where the keys are the original
   -- (as introduced by the programmer) properties, and the values
@@ -521,11 +522,12 @@ addProp msg sev prop state
       -- If the property immediately finishes computing, drop it. This
       -- is probably bad and probably the log function should be
       -- called here if it's falsified.
-      Right _ -> state
+      Right _ -> state { evtrace = Left (msg, sev, prop) : evtrace state }
       Left prop' -> state { properties = M.insert
                                            prop
                                            (msg, sev, Computing prop')
                                            (properties state)
+                          , evtrace = Left (msg, sev, prop) : evtrace state
                           }
 
 -- | Check the properties, returning the state with an updated
