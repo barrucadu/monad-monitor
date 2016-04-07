@@ -66,7 +66,6 @@ import qualified Data.Map as M
 import Data.Set (Set)
 import qualified Data.Set as S
 import Data.Typeable
-import Data.Void (Void)
 import System.IO (Handle, hPutStrLn, stderr, stdout)
 
 -- local imports
@@ -385,34 +384,34 @@ stmCheckProps isEnd var logf = do
 -------------------------------------------------------------------------------
 
 -- | Monad transformer that disabled monitoring functionality.
-newtype NoMonitoringT m a = NoMonitoringT { runNoMonitoringT :: m a }
+newtype NoMonitoringT event m a = NoMonitoringT { runNoMonitoringT :: m a }
 
-instance MonadTrans NoMonitoringT where
+instance Ord event => MonadTrans (NoMonitoringT event) where
   lift = NoMonitoringT
 
-instance Functor f => Functor (NoMonitoringT f) where
+instance (Functor f, Ord event) => Functor (NoMonitoringT event f) where
   fmap f (NoMonitoringT ma) = NoMonitoringT (fmap f ma)
 
-instance Applicative f => Applicative (NoMonitoringT f) where
+instance (Applicative f, Ord event) => Applicative (NoMonitoringT event f) where
   pure = NoMonitoringT . pure
 
   NoMonitoringT mf <*> NoMonitoringT ma = NoMonitoringT $ mf <*> ma
 
-instance Monad m => Monad (NoMonitoringT m) where
+instance (Monad m, Ord event) => Monad (NoMonitoringT event m) where
   return = pure
 
   NoMonitoringT ma >>= f = NoMonitoringT (ma >>= runNoMonitoringT . f)
 
-instance MonadIO m => MonadIO (NoMonitoringT m) where
+instance (MonadIO m, Ord event) => MonadIO (NoMonitoringT event m) where
   liftIO = lift . liftIO
 
-instance MonadThrow m => MonadThrow (NoMonitoringT m) where
+instance (MonadThrow m, Ord event) => MonadThrow (NoMonitoringT event m) where
   throwM = lift . throwM
 
-instance MonadCatch m => MonadCatch (NoMonitoringT m) where
+instance (MonadCatch m, Ord event) => MonadCatch (NoMonitoringT event m) where
   catch (NoMonitoringT ma) h = NoMonitoringT $ ma `catch` (runNoMonitoringT . h)
 
-instance MonadMask m => MonadMask (NoMonitoringT m) where
+instance (MonadMask m, Ord event) => MonadMask (NoMonitoringT event m) where
   mask a = NoMonitoringT $ mask $ \u -> runNoMonitoringT (a $ q u)
     where q u = NoMonitoringT . u . runNoMonitoringT
 
@@ -420,7 +419,7 @@ instance MonadMask m => MonadMask (NoMonitoringT m) where
     \u -> runNoMonitoringT (a $ q u)
     where q u = NoMonitoringT . u . runNoMonitoringT
 
-instance Monad f => MonadMonitor Void (NoMonitoringT f) where
+instance (Monad m, Ord event) => MonadMonitor event (NoMonitoringT event m) where
   startEvents _ = pure ()
   stopEvents  _ = pure ()
   addPropertyWithSeverity _ _ _ = pure ()
