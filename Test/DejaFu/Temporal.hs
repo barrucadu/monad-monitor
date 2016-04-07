@@ -15,6 +15,7 @@ module Test.DejaFu.Temporal
   , comptreeOf
   , comptreeOfIO
   -- * Utilities
+  , allOk
   , makeTreeFrom
   ) where
 
@@ -57,7 +58,7 @@ testTemporal :: Ord event
   => (forall t. ConcurrentMonitoringT event (ConcST t) a)
   -- ^ The computation to test.
   -> Falsified event
-testTemporal ma = checkTreeProps $ comptreeOf ma
+testTemporal ma = maybe allOk checkTreeProps $ comptreeOf ma
 
 -- | Variant of 'testTemporal' for computations which do @IO@.
 --
@@ -68,7 +69,7 @@ testTemporal ma = checkTreeProps $ comptreeOf ma
 testTemporalIO :: Ord event
   => ConcurrentMonitoringT event ConcIO a
   -> IO (Falsified event)
-testTemporalIO ma = checkTreeProps <$> comptreeOfIO ma
+testTemporalIO ma = maybe allOk checkTreeProps <$> comptreeOfIO ma
 
 -------------------------------------------------------------------------------
 
@@ -80,10 +81,13 @@ testTemporalIO ma = checkTreeProps <$> comptreeOfIO ma
 type Comptree event = Tree (Either (String, Severity, Property event) (TraceItem event))
 
 -- | Produce the tree of a computation.
+--
+-- Returns @Nothing@ if the computation does not start any events or
+-- monitor any properties.
 comptreeOf :: forall event a. Ord event
   => (forall t. ConcurrentMonitoringT event (ConcST t) a)
   -- ^ The computation to run.
-  -> Comptree event
+  -> Maybe (Comptree event)
 comptreeOf ma = makeCTreeFrom $ sctBound'
   (runConcurrentMonitoringT (\_ _ -> pure ()) $ ma >> getState)
 
@@ -97,7 +101,7 @@ comptreeOf ma = makeCTreeFrom $ sctBound'
 -- | Variant of 'comptreeOf' for computations which do @IO@.
 comptreeOfIO :: Ord event
   => ConcurrentMonitoringT event ConcIO a
-  -> IO (Comptree event)
+  -> IO (Maybe (Comptree event))
 comptreeOfIO ma = makeCTreeFrom <$>
   sctBoundIO defaultMemType defaultBounds
   (runConcurrentMonitoringT (\_ _ -> pure ()) $ ma >> getState)
@@ -109,24 +113,22 @@ comptreeOfIO ma = makeCTreeFrom <$>
 -- Discards executions that end in failure.
 makeCTreeFrom :: Ord event
   => [(Either failure (MonitoringState event), trace)]
-  -> Comptree event
+  -> Maybe (Comptree event)
 makeCTreeFrom traces = makeTreeFrom evtraces where
   evtraces = [ reverse (evtrace state) | (Right state, _) <- traces ]
 
 -- | Construct a tree from a list of paths from the root to a leaf.
 --
+-- Returns @Nothing@ if the list of paths is empty.
+--
 -- This assumes that (1) every path has at least one initial element
 -- in common; and that (2) no path is a prefix of another.
-makeTreeFrom :: Ord a => [[a]] -> Tree a
-makeTreeFrom [] = error "makeTreeFrom: empty path list."
-makeTreeFrom ts = go1 (ordNub $ map tail ts) (head $ head ts) where
+makeTreeFrom :: Ord a => [[a]] -> Maybe (Tree a)
+makeTreeFrom [] = Nothing
+makeTreeFrom ts = Just $ go (ordNub $ map tail ts) (head $ head ts) where
   -- Construct a tree node given the paths and the label.
-  go1 paths label =
-    Node label . mapMaybe go2 . groupByHead . filter (not . null) $ paths
-
-  -- Construct a child given a path
-  go2 [] = Nothing
-  go2 as = Just $ makeTreeFrom as
+  go paths label =
+    Node label . mapMaybe makeTreeFrom . groupByHead . filter (not . null) $ paths
 
 -- | Check properties over a computation tree.
 checkTreeProps :: Ord event => Comptree event -> Falsified event
@@ -150,6 +152,10 @@ checkTreeProps ctree = Falsified failures where
   step es (Left _) = es
 
 -------------------------------------------------------------------------------
+
+-- | Nothing falsified.
+allOk :: Falsified event
+allOk = Falsified M.empty
 
 -- | Get the monitoring state
 getState :: MonadConc m => ConcurrentMonitoringT event m (MonitoringState event)
