@@ -320,6 +320,7 @@ instance (MonadConc m, Ord event) => MonadConc (ConcurrentMonitoringT event m) w
   casCRef r t        = lift . casCRef r t
   modifyCRefCAS r    = lift . modifyCRefCAS r
   atomically         = lift . atomically
+  readTVarConc       = lift . readTVarConc
 
   _concKnowsAbout = lift . _concKnowsAbout
   _concForgets    = lift . _concForgets
@@ -418,6 +419,65 @@ instance (MonadMask m, Ord event) => MonadMask (NoMonitoringT event m) where
   uninterruptibleMask a = NoMonitoringT $ uninterruptibleMask $
     \u -> runNoMonitoringT (a $ q u)
     where q u = NoMonitoringT . u . runNoMonitoringT
+
+instance (MonadConc m, Ord event) => MonadConc (NoMonitoringT event m) where
+  type STM      (NoMonitoringT event m) = STM m
+  type MVar     (NoMonitoringT event m) = MVar m
+  type CRef     (NoMonitoringT event m) = CRef m
+  type Ticket   (NoMonitoringT event m) = Ticket m
+  type ThreadId (NoMonitoringT event m) = ThreadId m
+
+  fork   = nomonitort fork
+  forkOn = nomonitort . forkOn
+
+  forkWithUnmask        = nomonitort' forkWithUnmask
+  forkWithUnmaskN   n   = nomonitort' (forkWithUnmaskN   n  )
+  forkOnWithUnmask    i = nomonitort' (forkOnWithUnmask    i)
+  forkOnWithUnmaskN n i = nomonitort' (forkOnWithUnmaskN n i)
+
+  getNumCapabilities = lift getNumCapabilities
+  setNumCapabilities = lift . setNumCapabilities
+  myThreadId         = lift myThreadId
+  yield              = lift yield
+  throwTo t          = lift . throwTo t
+  newEmptyMVar       = lift newEmptyMVar
+  newEmptyMVarN      = lift . newEmptyMVarN
+  readMVar           = lift . readMVar
+  putMVar v          = lift . putMVar v
+  tryPutMVar v       = lift . tryPutMVar v
+  takeMVar           = lift . takeMVar
+  tryTakeMVar        = lift . tryTakeMVar
+  newCRef            = lift . newCRef
+  newCRefN n         = lift . newCRefN n
+  readCRef           = lift . readCRef
+  atomicModifyCRef r = lift . atomicModifyCRef r
+  writeCRef r        = lift . writeCRef r
+  atomicWriteCRef r  = lift . atomicWriteCRef r
+  readForCAS         = lift . readForCAS
+  peekTicket         = lift . peekTicket
+  casCRef r t        = lift . casCRef r t
+  modifyCRefCAS r    = lift . modifyCRefCAS r
+  atomically         = lift . atomically
+  readTVarConc       = lift . readTVarConc
+
+  _concKnowsAbout = lift . _concKnowsAbout
+  _concForgets    = lift . _concForgets
+  _concAllKnown   = lift _concAllKnown
+  _concMessage    = lift . _concMessage
+
+nomonitort :: MonadConc m
+  => (m a -> m b)
+  -> NoMonitoringT e m a
+  -> NoMonitoringT e m b
+nomonitort f = NoMonitoringT . f . runNoMonitoringT
+
+nomonitort' :: MonadConc m
+  => (((forall x. m x -> m x) -> m a) -> m b)
+  -> ((forall x. NoMonitoringT e m x -> NoMonitoringT e m x)
+    -> NoMonitoringT e m a)
+  -> NoMonitoringT e m b
+nomonitort' f ma = NoMonitoringT $
+  f (\g -> runNoMonitoringT $ ma (nomonitort g))
 
 instance (Monad m, Ord event) => MonadMonitor event (NoMonitoringT event m) where
   startEvents _ = pure ()
