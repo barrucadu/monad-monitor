@@ -7,6 +7,7 @@
 module Control.Monad.Monitor
   ( -- * @MonadMonitor@
     MonadMonitor(..)
+  , withEvent
 
   -- * Properties
 

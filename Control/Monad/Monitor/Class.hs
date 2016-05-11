@@ -9,6 +9,8 @@
 -- allow monitoring some sort of properties.
 module Control.Monad.Monitor.Class
   ( MonadMonitor(..)
+  , withEvent
+
   -- * Properties
 
   -- | See Control.Monad.Monitor.Property for fuller documentation.
@@ -122,6 +124,14 @@ class (Monad m, Ord event) => MonadMonitor event m | m -> event where
   -- Properties which have been generated are recorded, and not added
   -- to the pool if generated again.
   addTemplate :: Template event -> m ()
+
+-- | Start an event, run an action, and stop the event.
+withEvent :: MonadMonitor event m => event -> m a -> m a
+withEvent event ma = do
+  startEvent event
+  a <- ma
+  stopEvent event
+  pure a
 
 -------------------------------------------------------------------------------
 
