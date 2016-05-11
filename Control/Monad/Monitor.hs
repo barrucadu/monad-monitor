@@ -37,6 +37,12 @@ module Control.Monad.Monitor
   , runStderrConcurrentMonitoringT
   , runHandleConcurrentMonitoringT
 
+  , TracedMonitoringT(..)
+  , StartEvents(..)
+  , StopEvents(..)
+  , AddProperty(..)
+  , AddTemplate(..)
+
   , NoMonitoringT(..)
 
   -- * Utilities
@@ -250,7 +256,7 @@ instance (MonadConc m, Ord event) => Functor (ConcurrentMonitoringT event m) whe
     \var logf -> fmap f (ma var logf)
 
 instance (MonadConc m, Ord event) => Applicative (ConcurrentMonitoringT event m) where
-  pure a = ConcurrentMonitoringT $ \_ _ -> pure a
+  pure = lift . pure
 
   ConcurrentMonitoringT mf <*> ConcurrentMonitoringT ma = ConcurrentMonitoringT $
     \var logf -> mf var logf <*> ma var logf
@@ -276,12 +282,10 @@ instance (MonadConc m, Ord event) => MonadCatch (ConcurrentMonitoringT event m) 
 
 instance (MonadConc m, Ord event) => MonadMask (ConcurrentMonitoringT event m) where
   mask a = ConcurrentMonitoringT $ \var logf ->
-    mask $ \u -> unConcurrentMonitoringT (a $ q u) var logf
-    where q u (ConcurrentMonitoringT b) = ConcurrentMonitoringT (\var logf -> u $ b var logf)
+    mask $ \u -> unConcurrentMonitoringT (a $ concurrentt u) var logf
 
   uninterruptibleMask a = ConcurrentMonitoringT $ \var logf ->
-    uninterruptibleMask $ \u -> unConcurrentMonitoringT (a $ q u) var logf
-    where q u (ConcurrentMonitoringT b) = ConcurrentMonitoringT (\var logf -> u $ b var logf)
+    uninterruptibleMask $ \u -> unConcurrentMonitoringT (a $ concurrentt u) var logf
 
 instance (MonadConc m, Ord event) => MonadConc (ConcurrentMonitoringT event m) where
   type STM      (ConcurrentMonitoringT event m) = STM m
@@ -385,6 +389,128 @@ stmCheckProps isEnd var logf = do
 
 -------------------------------------------------------------------------------
 
+-- | Like 'ConcurrentMonitoringT', but doesn't permit any
+-- recover/logging behaviour, and doesn't check properties: it only
+-- logs them for offline checking later with '_concMessage'.
+newtype TracedMonitoringT event m a = TracedMonitoringT
+  { runTracedMonitoringT :: m a }
+
+instance Ord event => MonadTrans (TracedMonitoringT event) where
+  lift = TracedMonitoringT
+
+instance (MonadConc m, Ord event) => Functor (TracedMonitoringT event m) where
+  fmap f (TracedMonitoringT ma) = TracedMonitoringT (fmap f ma)
+
+instance (MonadConc m, Ord event) => Applicative (TracedMonitoringT event m) where
+  pure = lift . pure
+
+  TracedMonitoringT mf <*> TracedMonitoringT ma = TracedMonitoringT $ mf <*> ma
+
+instance (MonadConc m, Ord event) => Monad (TracedMonitoringT event m) where
+  return = pure
+
+  TracedMonitoringT ma >>= f = TracedMonitoringT (ma >>= runTracedMonitoringT . f)
+
+instance (MonadConc m, MonadIO m, Ord event) => MonadIO (TracedMonitoringT event m) where
+  liftIO = lift . liftIO
+
+instance (MonadConc m, Ord event) => MonadThrow (TracedMonitoringT event m) where
+  throwM = lift . throwM
+
+instance (MonadConc m, Ord event) => MonadCatch (TracedMonitoringT event m) where
+  catch (TracedMonitoringT ma) h = TracedMonitoringT $ ma `catch` (runTracedMonitoringT . h)
+
+instance (MonadConc m, Ord event) => MonadMask (TracedMonitoringT event m) where
+  mask a = TracedMonitoringT $ mask $ \u -> runTracedMonitoringT (a $ tracedt u)
+
+  uninterruptibleMask a = TracedMonitoringT $ uninterruptibleMask $
+    \u -> runTracedMonitoringT (a $ tracedt u)
+
+instance (MonadConc m, Ord event) => MonadConc (TracedMonitoringT event m) where
+  type STM      (TracedMonitoringT event m) = STM m
+  type MVar     (TracedMonitoringT event m) = MVar m
+  type CRef     (TracedMonitoringT event m) = CRef m
+  type Ticket   (TracedMonitoringT event m) = Ticket m
+  type ThreadId (TracedMonitoringT event m) = ThreadId m
+
+  fork   = tracedt fork
+  forkOn = tracedt . forkOn
+
+  forkWithUnmask        = tracedt' forkWithUnmask
+  forkWithUnmaskN   n   = tracedt' (forkWithUnmaskN   n  )
+  forkOnWithUnmask    i = tracedt' (forkOnWithUnmask    i)
+  forkOnWithUnmaskN n i = tracedt' (forkOnWithUnmaskN n i)
+
+  getNumCapabilities = lift getNumCapabilities
+  setNumCapabilities = lift . setNumCapabilities
+  myThreadId         = lift myThreadId
+  yield              = lift yield
+  throwTo t          = lift . throwTo t
+  newEmptyMVar       = lift newEmptyMVar
+  newEmptyMVarN      = lift . newEmptyMVarN
+  readMVar           = lift . readMVar
+  putMVar v          = lift . putMVar v
+  tryPutMVar v       = lift . tryPutMVar v
+  takeMVar           = lift . takeMVar
+  tryTakeMVar        = lift . tryTakeMVar
+  newCRef            = lift . newCRef
+  newCRefN n         = lift . newCRefN n
+  readCRef           = lift . readCRef
+  atomicModifyCRef r = lift . atomicModifyCRef r
+  writeCRef r        = lift . writeCRef r
+  atomicWriteCRef r  = lift . atomicWriteCRef r
+  readForCAS         = lift . readForCAS
+  peekTicket         = lift . peekTicket
+  casCRef r t        = lift . casCRef r t
+  modifyCRefCAS r    = lift . modifyCRefCAS r
+  atomically         = lift . atomically
+  readTVarConc       = lift . readTVarConc
+
+  _concKnowsAbout = lift . _concKnowsAbout
+  _concForgets    = lift . _concForgets
+  _concAllKnown   = lift _concAllKnown
+  _concMessage    = lift . _concMessage
+
+tracedt :: MonadConc m
+  => (m a -> m b)
+  -> TracedMonitoringT e m a
+  -> TracedMonitoringT e m b
+tracedt f = TracedMonitoringT . f . runTracedMonitoringT
+
+tracedt' :: MonadConc m
+  => (((forall x. m x -> m x) -> m a) -> m b)
+  -> ((forall x. TracedMonitoringT e m x -> TracedMonitoringT e m x)
+    -> TracedMonitoringT e m a)
+  -> TracedMonitoringT e m b
+tracedt' f ma = TracedMonitoringT $
+  f (\g -> runTracedMonitoringT $ ma (tracedt g))
+
+-- | Emitted by 'TracedMonitoringT' when 'startEvent' or 'startEvents'
+-- is called.
+data StartEvents event = StartEvents [event]
+  deriving (Eq, Ord, Show)
+
+-- | Emitted by 'TracedMonitoringT' when 'stopEvent' or 'stopEvents'
+-- is called.
+data StopEvents  event = StopEvents [event]
+  deriving (Eq, Ord, Show)
+
+-- | Emitted by 'TracedMonitoringT' when 'addProperty' or
+-- 'addPropertyWithSeverity' is called.
+data AddProperty event = AddProperty Severity String (Property event)
+  deriving (Eq, Ord, Show)
+
+-- | Emitted by 'TracedMonitoringT' when 'addTemplate' is called.
+data AddTemplate event = AddTemplate (Template event)
+
+instance (MonadConc m, Ord event, Typeable event) => MonadMonitor event (TracedMonitoringT event m) where
+  startEvents = _concMessage . StartEvents
+  stopEvents  = _concMessage . StopEvents
+  addPropertyWithSeverity sev name = _concMessage . AddProperty sev name
+  addTemplate = _concMessage . AddTemplate
+
+-------------------------------------------------------------------------------
+
 -- | Monad transformer that disabled monitoring functionality.
 newtype NoMonitoringT event m a = NoMonitoringT { runNoMonitoringT :: m a }
 
@@ -414,12 +540,10 @@ instance (MonadCatch m, Ord event) => MonadCatch (NoMonitoringT event m) where
   catch (NoMonitoringT ma) h = NoMonitoringT $ ma `catch` (runNoMonitoringT . h)
 
 instance (MonadMask m, Ord event) => MonadMask (NoMonitoringT event m) where
-  mask a = NoMonitoringT $ mask $ \u -> runNoMonitoringT (a $ q u)
-    where q u = NoMonitoringT . u . runNoMonitoringT
+  mask a = NoMonitoringT $ mask $ \u -> runNoMonitoringT (a $ nomonitort u)
 
   uninterruptibleMask a = NoMonitoringT $ uninterruptibleMask $
-    \u -> runNoMonitoringT (a $ q u)
-    where q u = NoMonitoringT . u . runNoMonitoringT
+    \u -> runNoMonitoringT (a $ nomonitort u)
 
 instance (MonadConc m, Ord event) => MonadConc (NoMonitoringT event m) where
   type STM      (NoMonitoringT event m) = STM m
@@ -466,14 +590,12 @@ instance (MonadConc m, Ord event) => MonadConc (NoMonitoringT event m) where
   _concAllKnown   = lift _concAllKnown
   _concMessage    = lift . _concMessage
 
-nomonitort :: MonadConc m
-  => (m a -> m b)
+nomonitort :: (m a -> m b)
   -> NoMonitoringT e m a
   -> NoMonitoringT e m b
 nomonitort f = NoMonitoringT . f . runNoMonitoringT
 
-nomonitort' :: MonadConc m
-  => (((forall x. m x -> m x) -> m a) -> m b)
+nomonitort' :: (((forall x. m x -> m x) -> m a) -> m b)
   -> ((forall x. NoMonitoringT e m x -> NoMonitoringT e m x)
     -> NoMonitoringT e m a)
   -> NoMonitoringT e m b
