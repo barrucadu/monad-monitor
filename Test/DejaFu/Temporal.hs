@@ -29,6 +29,7 @@ import Data.List (groupBy, sortBy)
 import Data.Map (Map)
 import qualified Data.Map as M
 import Data.Ord (comparing)
+import Data.Semigroup (Semigroup(..))
 import qualified Data.Set as S
 import Data.Tree (Tree(..))
 import Test.DejaFu (defaultBounds, defaultMemType)
@@ -40,9 +41,12 @@ import Unsafe.Coerce (unsafeCoerce)
 newtype Falsified event = Falsified (Map (Property event) (FailedProp event))
   deriving (Eq, Read, Show, NFData)
 
+instance Ord event => Semigroup (Falsified event) where
+  Falsified a <> Falsified b = Falsified $ a `M.union` b
+
 instance Ord event => Monoid (Falsified event) where
-  mempty = allOk
-  mappend (Falsified a) (Falsified b) = Falsified $ a `M.union` b
+  mempty  = allOk
+  mappend = (Data.Semigroup.<>)
 
 data FailedProp event = FailedProp
   { propMsg :: String
