@@ -16,7 +16,7 @@ module Test.DejaFu.Temporal
   , comptreeOfIO
   -- * Utilities
   , allOk
-  , makeTreeFrom
+  , makeTreesFrom
   ) where
 
 import Control.DeepSeq (NFData(..))
@@ -28,7 +28,6 @@ import Data.Function (on)
 import Data.List (groupBy, sortBy)
 import Data.Map (Map)
 import qualified Data.Map as M
-import Data.Maybe (mapMaybe)
 import Data.Ord (comparing)
 import qualified Data.Set as S
 import Data.Tree (Tree(..))
@@ -40,6 +39,10 @@ import Unsafe.Coerce (unsafeCoerce)
 
 newtype Falsified event = Falsified (Map (Property event) (FailedProp event))
   deriving (Eq, Read, Show, NFData)
+
+instance Ord event => Monoid (Falsified event) where
+  mempty = allOk
+  mappend (Falsified a) (Falsified b) = Falsified $ a `M.union` b
 
 data FailedProp event = FailedProp
   { propMsg :: String
@@ -58,7 +61,7 @@ testTemporal :: Ord event
   => (forall t. ConcurrentMonitoringT event (ConcST t) a)
   -- ^ The computation to test.
   -> Falsified event
-testTemporal ma = maybe allOk checkTreeProps $ comptreeOf ma
+testTemporal ma = foldMap checkTreeProps $ comptreeOf ma
 
 -- | Variant of 'testTemporal' for computations which do @IO@.
 --
@@ -69,7 +72,7 @@ testTemporal ma = maybe allOk checkTreeProps $ comptreeOf ma
 testTemporalIO :: Ord event
   => ConcurrentMonitoringT event ConcIO a
   -> IO (Falsified event)
-testTemporalIO ma = maybe allOk checkTreeProps <$> comptreeOfIO ma
+testTemporalIO ma = foldMap checkTreeProps <$> comptreeOfIO ma
 
 -------------------------------------------------------------------------------
 
@@ -81,14 +84,11 @@ testTemporalIO ma = maybe allOk checkTreeProps <$> comptreeOfIO ma
 type Comptree event = Tree (Either (String, Severity, Property event) (TraceItem event))
 
 -- | Produce the tree of a computation.
---
--- Returns @Nothing@ if the computation does not start any events or
--- monitor any properties.
 comptreeOf :: forall event a. Ord event
   => (forall t. ConcurrentMonitoringT event (ConcST t) a)
   -- ^ The computation to run.
-  -> Maybe (Comptree event)
-comptreeOf ma = makeCTreeFrom $ sctBound'
+  -> [Comptree event]
+comptreeOf ma = makeCTreesFrom $ sctBound'
   (runConcurrentMonitoringT (\_ _ -> pure ()) $ ma >> getState)
 
   where
@@ -101,8 +101,8 @@ comptreeOf ma = makeCTreeFrom $ sctBound'
 -- | Variant of 'comptreeOf' for computations which do @IO@.
 comptreeOfIO :: Ord event
   => ConcurrentMonitoringT event ConcIO a
-  -> IO (Maybe (Comptree event))
-comptreeOfIO ma = makeCTreeFrom <$>
+  -> IO [Comptree event]
+comptreeOfIO ma = makeCTreesFrom <$>
   sctBoundIO defaultMemType defaultBounds
   (runConcurrentMonitoringT (\_ _ -> pure ()) $ ma >> getState)
 
@@ -111,24 +111,20 @@ comptreeOfIO ma = makeCTreeFrom <$>
 -- | Wrapper around 'makeTreeFrom' to deal with the dejafu cruft.
 --
 -- Discards executions that end in failure.
-makeCTreeFrom :: Ord event
+makeCTreesFrom :: Ord event
   => [(Either failure (MonitoringState event), trace)]
-  -> Maybe (Comptree event)
-makeCTreeFrom traces = makeTreeFrom evtraces where
+  -> [Comptree event]
+makeCTreesFrom traces = makeTreesFrom evtraces where
   evtraces = [ reverse (evtrace state) | (Right state, _) <- traces ]
 
 -- | Construct a tree from a list of paths from the root to a leaf.
---
--- Returns @Nothing@ if the list of paths is empty.
---
--- This assumes that (1) every path has at least one initial element
--- in common; and that (2) no path is a prefix of another.
-makeTreeFrom :: Ord a => [[a]] -> Maybe (Tree a)
-makeTreeFrom [] = Nothing
-makeTreeFrom ts = Just $ go (ordNub $ map tail ts) (head $ head ts) where
+makeTreesFrom :: Ord a => [[a]] -> [Tree a]
+makeTreesFrom ts = map mkTree (groupByHead ts) where
+  mkTree ts' = go (ordNub $ map tail ts') (head $ head ts')
+
   -- Construct a tree node given the paths and the label.
   go paths label =
-    Node label . mapMaybe makeTreeFrom . groupByHead . filter (not . null) $ paths
+    Node label . concatMap makeTreesFrom . groupByHead . filter (not . null) $ paths
 
 -- | Check properties over a computation tree.
 checkTreeProps :: Ord event => Comptree event -> Falsified event
